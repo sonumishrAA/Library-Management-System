@@ -487,7 +487,10 @@ export async function verifyPayment(payload) {
     headers: headers(),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) throw new Error("Payment verification failed");
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Payment verification failed");
+  }
   return res.json();
 }
 
