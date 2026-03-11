@@ -13,10 +13,10 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
     );
 
-    // Fetch only the columns used by the public pricing page.
+    // Fetch only the columns used by the pricing and registration flows.
     const { data, error } = await supabaseClient
       .from("pricing_plans")
-      .select("name, label, base_price, cctv_price, duration_days")
+      .select("id, name, label, base_price, cctv_price, duration_days")
       .order("duration_days", { ascending: true });
 
     if (error) throw error;

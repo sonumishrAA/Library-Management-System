@@ -1,0 +1,41 @@
+name,father_name,phone,gender,address,shift_label,plan_duration,admission_date,payment_status,has_locker,locker_no
+Sneha Khan,Harish Khan,9000000049,female,"128, Civil Lines, Ranchi",Night,12,2026-02-02,paid,no,
+Nikhil Mishra,Deepak Mishra,9000000099,male,"50, Subhash Nagar, Patna",Evening,12,2025-08-03,paid,yes,ML-050
+Aman Yadav,Rajesh Yadav,9000000129,male,"176, Civil Lines, Ranchi",Night,3,2026-01-15,,,
+Yash Singh,Vijay Singh,9000000159,male,,Night,2,2025-12-21,paid,yes,
+Rohan Saxena,Ramesh Saxena,9000000196,male,"118, College Road, Lucknow",Evening,1,2025-11-14,pending,yes,ML-053
+Sahil Patel,Vijay Patel,9000000231,male,"60, Station Road, Jaipur",Evening,3,2026-02-18,paid,,
+Ira Pandey,,9000000273,female,"55, MG Road, Surat",Evening,,2025-08-01,,,
+Kabir Saxena,Anil Saxena,9000000305,male,"18, Nehru Nagar, Nagpur",Morning,12,2025-11-25,,yes,ML-010
+Yash Yadav,Ashok Yadav,9000000349,male,"139, Civil Lines, Jaipur",Morning,3,2026-02-01,paid,yes,ML-068
+Ira Gupta,Anil Gupta,9000000382,female,,Evening,2,2025-12-10,pending,yes,
+Aditi Khan,,9000000425,female,"163, Shastri Chowk, Jaipur",Evening,3,2026-02-15,pending,yes,FL-032
+Dev Sharma,Vijay Sharma,9000000463,male,,Evening,12,,pending,yes,
+Naina Ansari,Mahesh Ansari,9000000506,female,"77, Civil Lines, Lucknow",After Noon,6,2026-02-09,paid,yes,FL-034
+Vivaan Nair,Naresh Nair,9000000540,male,"110, Subhash Nagar, Jaipur",Morning,12,,paid,yes,ML-003
+Vivaan Mishra,Dinesh Mishra,9000000562,male,,Morning,2,2025-07-23,pending,no,
+Nikhil Sharma,Mukesh Sharma,9000000600,male,"44, Station Road, Patna",Night,6,,paid,no,
+Priya Mishra,,9000000642,female,"21, MG Road, Bhopal",Evening,6,2026-01-13,paid,yes,FL-003
+Sneha Yadav,Rajesh Yadav,9000000675,female,,Morning,6,2026-02-28,paid,,
+Arjun Mehta,Naresh Mehta,9000000707,male,"23, Civil Lines, Kanpur",Evening,3,2025-12-04,paid,no,
+Priya Mishra,Dinesh Mishra,9000000740,female,,After Noon,,2025-10-10,paid,no,
+Kunal Verma,,9000000795,male,"35, Nehru Nagar, Kanpur",Night,2,2025-10-07,paid,no,
+Ananya Patel,,9000000842,female,"56, MG Road, Patna",After Noon,3,2025-10-21,pending,no,
+Rohan Mehta,Anil Mehta,9000000878,male,"40, Old Bypass, Bhopal",After Noon,12,2025-07-13,,yes,ML-090
+Ira Khan,Deepak Khan,9000000901,female,"55, Civil Lines, Patna",Night,,2025-07-31,,,
+Pranav Yadav,Ramesh Yadav,9000000950,male,"49, Station Road, Lucknow",Evening,12,,,yes,ML-030
+Sana Pandey,Ajay Pandey,9000000967,female,,After Noon,1,2026-02-12,,,
+Arjun Reddy,Pradeep Reddy,9000001016,male,"59, College Road, Lucknow",After Noon,6,2025-09-29,pending,yes,
+Ishaan Jain,Sunil Jain,9000001044,male,,Morning,,2025-08-18,,,
+Kabir Verma,Pradeep Verma,9000001082,male,,Evening,1,2026-01-12,paid,yes,ML-063
+Aditya Ansari,Naresh Ansari,9000001129,male,"2, College Road, Lucknow",Evening,,2025-10-01,pending,yes,ML-031
+Sahil Yadav,Rakesh Yadav,9000001155,male,,Night,2,2025-07-25,paid,yes,ML-094
+Khushi Saxena,Naresh Saxena,9000001187,female,"168, College Road, Kanpur",Night,3,2025-07-17,paid,yes,FL-078
+Aman Sharma,Harish Sharma,9000001249,male,"49, Civil Lines, Varanasi",Evening,2,2026-01-27,paid,,
+Aarav Yadav,Rakesh Yadav,9000001261,male,"116, Civil Lines, Kanpur",After Noon,3,2025-08-25,paid,yes,
+Aditya Mishra,Suresh Mishra,9000001321,male,"155, Sector 12, Indore",Morning,6,2025-08-20,,,
+Arjun Chauhan,Ajay Chauhan,9000001334,male,"155, Shastri Chowk, Jaipur",Morning,,2025-07-09,pending,no,
+Sahil Reddy,,9000001374,male,"133, MG Road, Lucknow",Night,,2025-10-28,,yes,ML-065
+Aarav Reddy,,9000001410,male,"27, Station Road, Kanpur",Evening,2,2025-12-18,pending,,
+,,,male,,Morning,,,,,
+Temp Row,,,female,,,,,,,

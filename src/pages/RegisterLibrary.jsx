@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import StepIndicator from '../components/StepIndicator.jsx';
-import { registerLibrary, getPricing } from '../lib/api.js';
+import { registerLibraryBatch, getPricing, createPaymentOrder, verifyPayment } from '../lib/api.js';
 
 const INDIAN_STATES = [
   'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh',
@@ -14,6 +14,502 @@ const INDIAN_STATES = [
   'Andaman and Nicobar Islands', 'Chandigarh', 'Dadra and Nagar Haveli and Daman and Diu',
   'Delhi', 'Jammu and Kashmir', 'Ladakh', 'Lakshadweep', 'Puducherry',
 ];
+
+const formatTime12 = (time24) => {
+  if (!time24) return '';
+  const [hours, minutes] = time24.split(':');
+  const h = parseInt(hours, 10);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 || 12;
+  return `${h12}:${minutes} ${ampm}`;
+};
+
+const FEE_PLAN_MONTHS = Array.from({ length: 12 }, (_, idx) => idx + 1);
+
+const createEmptyFeePlans = () =>
+  Object.fromEntries(FEE_PLAN_MONTHS.map((month) => [String(month), '']));
+
+const normalizeFeePlans = (feePlans = {}) =>
+  Object.fromEntries(
+    FEE_PLAN_MONTHS.map((month) => {
+      const key = String(month);
+      const raw = feePlans?.[key];
+      return [key, raw === undefined || raw === null ? '' : String(raw)];
+    }),
+  );
+
+const compactPlanPayload = (feePlans = {}) =>
+  Object.fromEntries(
+    Object.entries(feePlans)
+      .filter(([, value]) => value !== '' && value !== null && value !== undefined)
+      .map(([month, value]) => [month, Number(value)]),
+  );
+
+const createEmptyShiftForm = () => ({
+  label: '',
+  start_time: '',
+  end_time: '',
+  fee_plans: createEmptyFeePlans(),
+});
+
+const getShiftPlanAmount = (shift, durationMonths) => {
+  if (!shift) return 0;
+  const duration = Number(durationMonths) || 1;
+  const planValue = shift.fee_plans?.[String(duration)];
+
+  if (planValue === undefined || planValue === null || planValue === '') {
+    if (duration === 1) {
+      const monthlyFee = Number(shift.monthly_fee);
+      return Number.isNaN(monthlyFee) ? null : monthlyFee;
+    }
+    return null;
+  }
+
+  const numericPlanValue = Number(planValue);
+  return Number.isNaN(numericPlanValue) ? null : numericPlanValue;
+};
+
+const getComboPlanAmount = (combo, durationMonths) => {
+  if (!combo) return null;
+  const duration = Number(durationMonths) || 1;
+  const key = String(duration);
+
+  const customPlanValue = combo.custom_fee_plans?.[key];
+  if (customPlanValue !== undefined && customPlanValue !== null && customPlanValue !== '') {
+    const numericCustom = Number(customPlanValue);
+    if (!Number.isNaN(numericCustom)) return numericCustom;
+  }
+
+  const defaultPlanValue = combo.default_fee_plans?.[key];
+  if (defaultPlanValue !== undefined && defaultPlanValue !== null && defaultPlanValue !== '') {
+    const numericDefault = Number(defaultPlanValue);
+    if (!Number.isNaN(numericDefault)) return numericDefault;
+  }
+
+  if (duration === 1) {
+    const oneMonthFallback = Number(combo.custom_fee ?? combo.default_fee);
+    return Number.isNaN(oneMonthFallback) ? null : oneMonthFallback;
+  }
+
+  return null;
+};
+
+const getConfiguredPlanEntries = (feePlans = {}) =>
+  Object.entries(feePlans || {})
+    .filter(
+      ([month, value]) =>
+        month !== '' &&
+        value !== '' &&
+        value !== null &&
+        value !== undefined &&
+        !Number.isNaN(Number(value)),
+    )
+    .map(([month, value]) => ({ month: Number(month), amount: Number(value) }))
+    .filter((entry) => Number.isFinite(entry.month) && Number.isFinite(entry.amount))
+    .sort((a, b) => a.month - b.month);
+
+const STUDENT_CSV_HEADERS = [
+  'name',
+  'father_name',
+  'phone',
+  'gender',
+  'address',
+  'shift_label',
+  'plan_duration',
+  'admission_date',
+  'payment_status',
+  'has_locker',
+  'locker_no',
+];
+
+const CSV_HEADER_ALIASES = {
+  name: ['name', 'full_name'],
+  father_name: ['father_name', 'father_name_optional', 'father_name_(optional)', 'father_name_optional_'],
+  phone: ['phone', 'mobile', 'mobile_number'],
+  gender: ['gender', 'sex'],
+  address: ['address', 'full_address'],
+  shift_label: ['shift_label', 'shift', 'shift_name'],
+  plan_duration: ['plan_duration', 'months', 'plan_duration_months'],
+  admission_date: ['admission_date', 'start_date', 'joining_date'],
+  payment_status: ['payment_status', 'payment'],
+  has_locker: ['has_locker', 'assign_locker', 'locker'],
+  locker_no: ['locker_no', 'locker_number'],
+};
+
+const getTodayDateISO = () => new Date().toISOString().split('T')[0];
+
+const normalizeDurationMonths = (value) => {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return 1;
+  return Math.min(12, Math.max(1, Math.round(numericValue)));
+};
+
+const addMonthsToDateISO = (dateValue, months) => {
+  const fallback = getTodayDateISO();
+  const safeDate = dateValue || fallback;
+  const date = new Date(`${safeDate}T00:00:00`);
+  if (Number.isNaN(date.getTime())) {
+    return addMonthsToDateISO(fallback, months);
+  }
+  date.setMonth(date.getMonth() + normalizeDurationMonths(months));
+  return date.toISOString().split('T')[0];
+};
+
+const normalizeStudentGender = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'female' ? 'female' : 'male';
+};
+
+const normalizePaymentStatus = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'pending' ? 'pending' : 'paid';
+};
+
+const normalizeCsvHeader = (header) =>
+  String(header || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_');
+
+const parseCsvLine = (line) => {
+  const values = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    const next = line[i + 1];
+
+    if (ch === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (ch === ',' && !inQuotes) {
+      values.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += ch;
+  }
+
+  values.push(current.trim());
+  return values;
+};
+
+const parseCsvText = (csvText = '') =>
+  csvText
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map(parseCsvLine);
+
+const parseCsvBoolean = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['1', 'yes', 'true', 'y'].includes(normalized);
+};
+
+const toCsvCell = (value) => {
+  const stringValue = String(value ?? '');
+  if (stringValue.includes('"') || stringValue.includes(',') || stringValue.includes('\n')) {
+    return `"${stringValue.replace(/"/g, '""')}"`;
+  }
+  return stringValue;
+};
+
+const getPlanIdentity = (plan) => {
+  if (!plan) return '';
+  if (plan.id !== undefined && plan.id !== null && String(plan.id).trim() !== '') {
+    return `id:${String(plan.id)}`;
+  }
+  if (plan.name) return `name:${String(plan.name)}`;
+  return '';
+};
+
+const generateStudentRowId = () =>
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `student-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const createStudentRow = (overrides = {}) => {
+  const today = getTodayDateISO();
+  const duration = normalizeDurationMonths(overrides.plan_duration || 1);
+  const admissionDate = overrides.admission_date || today;
+  return {
+    id: generateStudentRowId(),
+    name: '',
+    father_name: '',
+    phone: '',
+    address: '',
+    gender: 'male',
+    shift_id: '',
+    seat_number: '',
+    seat_available_count: 0,
+    has_locker: false,
+    locker_no: '',
+    locker_options: [],
+    locker_available_count: 0,
+    locker_allowed: false,
+    locker_disabled_reason: 'Select a shift first',
+    plan_duration: String(duration),
+    admission_date: admissionDate,
+    end_date: addMonthsToDateISO(admissionDate, duration),
+    amount_paid: 0,
+    payment_status: 'paid',
+    ...overrides,
+  };
+};
+
+const getSeatPoolForStudent = (lib, gender) => {
+  const maleSeats = Number(lib?.male_seats) || 0;
+  const femaleSeats = Number(lib?.female_seats) || 0;
+  const normalizedGender = normalizeStudentGender(gender);
+
+  if (maleSeats > 0 && femaleSeats > 0) {
+    const count = normalizedGender === 'female' ? femaleSeats : maleSeats;
+    const prefix = normalizedGender === 'female' ? 'F' : 'M';
+    return Array.from({ length: count }, (_, idx) => `${prefix}${idx + 1}`);
+  }
+
+  if (maleSeats > 0) {
+    return Array.from({ length: maleSeats }, (_, idx) => `M${idx + 1}`);
+  }
+
+  if (femaleSeats > 0) {
+    return Array.from({ length: femaleSeats }, (_, idx) => `F${idx + 1}`);
+  }
+
+  return [];
+};
+
+const getLockerPolicyForStudent = (lib, gender) => {
+  const maleLockers = Number(lib?.male_lockers) || 0;
+  const femaleLockers = Number(lib?.female_lockers) || 0;
+  const normalizedGender = normalizeStudentGender(gender);
+
+  if (normalizedGender === 'female' && femaleLockers > 0) {
+    return lib?.femaleLockerPolicy || null;
+  }
+  if (normalizedGender === 'male' && maleLockers > 0) {
+    return lib?.maleLockerPolicy || null;
+  }
+
+  if (femaleLockers === 0 && maleLockers > 0) {
+    return lib?.maleLockerPolicy || null;
+  }
+  if (maleLockers === 0 && femaleLockers > 0) {
+    return lib?.femaleLockerPolicy || null;
+  }
+
+  return null;
+};
+
+const getLockerPoolForStudent = (lib, gender) => {
+  const maleLockers = Number(lib?.male_lockers) || 0;
+  const femaleLockers = Number(lib?.female_lockers) || 0;
+  const normalizedGender = normalizeStudentGender(gender);
+
+  if (maleLockers > 0 && femaleLockers > 0) {
+    const count = normalizedGender === 'female' ? femaleLockers : maleLockers;
+    const prefix = normalizedGender === 'female' ? 'FL' : 'ML';
+    return Array.from({ length: count }, (_, idx) => `${prefix}${idx + 1}`);
+  }
+
+  if (maleLockers > 0) {
+    return Array.from({ length: maleLockers }, (_, idx) => `ML${idx + 1}`);
+  }
+
+  if (femaleLockers > 0) {
+    return Array.from({ length: femaleLockers }, (_, idx) => `FL${idx + 1}`);
+  }
+
+  return [];
+};
+
+const isLockerRuleEligible = (eligibleShiftType, durationHours) => {
+  if (!Number.isFinite(Number(durationHours))) return false;
+  const duration = Number(durationHours);
+  if (eligibleShiftType === '24h_only') return duration >= 24;
+  if (eligibleShiftType === '12h_plus') return duration >= 12;
+  return true;
+};
+
+const lockerRuleLabel = (eligibleShiftType) => {
+  if (eligibleShiftType === '24h_only') return '24-hour';
+  if (eligibleShiftType === '12h_plus') return '12+ hour';
+  return 'any';
+};
+
+const getShiftMetaForStudent = (lib, shiftId, durationMonths) => {
+  if (!shiftId) {
+    return { amount: 0, durationHours: null, shiftIds: [] };
+  }
+
+  const baseShift = (lib?.shifts || []).find((shift) => shift.id === shiftId);
+  if (baseShift) {
+    return {
+      amount: getShiftPlanAmount(baseShift, durationMonths) ?? 0,
+      durationHours: Number(baseShift.duration_hours) || 0,
+      shiftIds: [baseShift.id],
+    };
+  }
+
+  const comboShift = (lib?.combinedPricing || []).find((combo) => combo.id === shiftId);
+  if (comboShift) {
+    return {
+      amount: getComboPlanAmount(comboShift, durationMonths) ?? 0,
+      durationHours: Number(comboShift.duration_hours) || 0,
+      shiftIds: Array.isArray(comboShift.shift_ids) ? comboShift.shift_ids : [],
+    };
+  }
+
+  return { amount: 0, durationHours: null, shiftIds: [] };
+};
+
+const recalculateImportedStudentsForLibrary = (lib, students = []) => {
+  const occupiedByShift = new Map();
+  const occupiedLockers = new Set();
+
+  return (students || []).map((student) => {
+    const durationMonths = normalizeDurationMonths(student.plan_duration);
+    const admissionDate = student.admission_date || getTodayDateISO();
+    const endDate = addMonthsToDateISO(admissionDate, durationMonths);
+    const gender = normalizeStudentGender(student.gender);
+    const shiftMeta = getShiftMetaForStudent(lib, student.shift_id, durationMonths);
+
+    const seatPool = student.shift_id ? getSeatPoolForStudent(lib, gender) : [];
+    const shiftOccupancySet = student.shift_id
+      ? occupiedByShift.get(student.shift_id) || new Set()
+      : new Set();
+    const existingSeat = String(student.seat_number || '').trim();
+
+    let assignedSeat = '';
+    if (student.shift_id && seatPool.length > 0) {
+      const canKeepExistingSeat =
+        existingSeat &&
+        seatPool.includes(existingSeat) &&
+        !shiftOccupancySet.has(existingSeat);
+      assignedSeat = canKeepExistingSeat
+        ? existingSeat
+        : seatPool.find((seatNumber) => !shiftOccupancySet.has(seatNumber)) || '';
+
+      if (assignedSeat) {
+        shiftOccupancySet.add(assignedSeat);
+      }
+      occupiedByShift.set(student.shift_id, shiftOccupancySet);
+    }
+
+    const availableSeatCount = student.shift_id
+      ? Math.max(seatPool.length - shiftOccupancySet.size, 0)
+      : 0;
+
+    const lockerPolicy = getLockerPolicyForStudent(lib, gender);
+    const isRuleEligible =
+      Boolean(lockerPolicy) &&
+      isLockerRuleEligible(lockerPolicy.eligible_shift_type, shiftMeta.durationHours);
+    const lockerPool = Boolean(student.shift_id) && isRuleEligible
+      ? getLockerPoolForStudent(lib, gender)
+      : [];
+    const lockerAllowed = Boolean(student.shift_id) && Boolean(lockerPolicy) && isRuleEligible && lockerPool.length > 0;
+    const existingLocker = String(student.locker_no || '').trim();
+    const requestedLocker = lockerAllowed ? Boolean(student.has_locker) : false;
+
+    let assignedLocker = '';
+    let hasLocker = false;
+    if (lockerAllowed && requestedLocker) {
+      const canKeepExistingLocker =
+        existingLocker &&
+        lockerPool.includes(existingLocker) &&
+        !occupiedLockers.has(existingLocker);
+
+      assignedLocker = canKeepExistingLocker
+        ? existingLocker
+        : lockerPool.find((lockerNo) => !occupiedLockers.has(lockerNo)) || '';
+
+      hasLocker = Boolean(assignedLocker);
+      if (assignedLocker) occupiedLockers.add(assignedLocker);
+    }
+
+    const lockerOptions = lockerAllowed
+      ? lockerPool.filter(
+          (lockerNo) =>
+            !occupiedLockers.has(lockerNo) ||
+            lockerNo === assignedLocker ||
+            lockerNo === existingLocker,
+        )
+      : [];
+
+    const lockerAvailableCount = lockerAllowed
+      ? lockerPool.filter((lockerNo) => !occupiedLockers.has(lockerNo)).length
+      : 0;
+
+    let lockerDisabledReason = '';
+    if (!student.shift_id) {
+      lockerDisabledReason = 'Select a shift first';
+    } else if (!lockerPolicy) {
+      lockerDisabledReason = 'No locker policy available for this student';
+    } else if (!isRuleEligible) {
+      lockerDisabledReason = `Locker is allowed only for ${lockerRuleLabel(lockerPolicy.eligible_shift_type)} shifts`;
+    } else if (lockerPool.length === 0) {
+      lockerDisabledReason = 'No lockers configured for this student category';
+    } else if (requestedLocker && !assignedLocker) {
+      lockerDisabledReason = 'No locker left for this student category';
+    }
+
+    if (!hasLocker && lockerAllowed && lockerAvailableCount === 0) {
+      lockerDisabledReason = 'No locker left for this student category';
+    }
+
+    const isLockerAssignable = lockerAllowed && (lockerAvailableCount > 0 || hasLocker);
+
+    return {
+      ...student,
+      id: student.id || generateStudentRowId(),
+      gender,
+      plan_duration: String(durationMonths),
+      admission_date: admissionDate,
+      end_date: endDate,
+      amount_paid: Number.isFinite(Number(shiftMeta.amount)) ? Number(shiftMeta.amount) : 0,
+      payment_status: normalizePaymentStatus(student.payment_status),
+      seat_number: assignedSeat,
+      seat_available_count: availableSeatCount,
+      locker_allowed: isLockerAssignable,
+      locker_disabled_reason: isLockerAssignable ? '' : lockerDisabledReason,
+      has_locker: hasLocker,
+      locker_no: hasLocker ? assignedLocker : '',
+      locker_options: lockerOptions,
+      locker_available_count: lockerAvailableCount,
+    };
+  });
+};
+
+const resolveStudentShiftIds = (lib, student) =>
+  getShiftMetaForStudent(lib, student?.shift_id, student?.plan_duration).shiftIds;
+
+const getShiftLabelForStudent = (lib, shiftId) => {
+  if (!shiftId) return 'Not selected';
+  const base = (lib?.shifts || []).find((shift) => shift.id === shiftId);
+  if (base) return `[Base] ${base.label}`;
+  const combo = (lib?.combinedPricing || []).find((item) => item.id === shiftId);
+  if (combo) return `[Combo] ${combo.label}`;
+  return 'Unknown shift';
+};
+
+const generateTempPassword = () => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789@#';
+  let output = '';
+  for (let i = 0; i < 10; i += 1) {
+    output += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return output;
+};
 
 const initialForm = {
   name: '',
@@ -39,19 +535,35 @@ const initialForm = {
   },
   contact_phone: '',
   contact_email: '',
+  admin_email: '',
+  admin_password: '',
+  staff_enabled: false,
+  staff_email: '',
+  staff_password: '',
   imported_students: [],
   selectedPlan: null,
 };
 
+const createInitialLibraryForm = () => ({
+  ...initialForm,
+  shifts: [],
+  combinedPricing: [],
+  maleLockerPolicy: { ...initialForm.maleLockerPolicy },
+  femaleLockerPolicy: { ...initialForm.femaleLockerPolicy },
+  imported_students: [],
+  selectedPlan: null,
+});
+
 export default function RegisterLibrary() {
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
-  const [libraries, setLibraries] = useState([initialForm]);
+  const [libraries, setLibraries] = useState([createInitialLibraryForm()]);
   const [activeLibIndex, setActiveLibIndex] = useState(0);
   const [errors, setErrors] = useState({});
   const [confirmed, setConfirmed] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
+  const studentCsvInputRefs = useRef({});
 
   // Admin account details form no longer needed in phase 1, but keep it for contact step temporarily if needed
   // Will be removed completely in Step 7 refactor
@@ -63,23 +575,33 @@ export default function RegisterLibrary() {
   // Pricing & Subscription state
   const [pricingPlans, setPricingPlans] = useState([]);
   const [isFetchingPlans, setIsFetchingPlans] = useState(false);
-  const [selectedPlan, setSelectedPlan] = useState(null);
+  
+  // Promo and Checkout State
+  const [promoInput, setPromoInput] = useState('');
+  const [promoCode, setPromoCode] = useState('');
+  const [promoDiscount, setPromoDiscount] = useState(0);
+  const [promoError, setPromoError] = useState('');
+  const [isVerifyingPromo, setIsVerifyingPromo] = useState(false);
 
   // Fetch Pricing Plans
   useEffect(() => {
     async function fetchPlans() {
       setIsFetchingPlans(true);
       try {
-        const result = await getPricing();
+        const result = await getPricing({ allowFallback: false });
         const data = result?.data || result;
         if (data && data.length > 0) {
           setPricingPlans(data);
-          // Auto-select the 3_month plan if available, else first plan
-          const defaultPlan = data.find(p => p.name === '3_month') || data[0];
-          setSelectedPlan(defaultPlan);
+          // Default plan should be 1 month (30 days). Fallback to shortest duration.
+          const defaultPlan =
+            data.find((p) => Number(p.duration_days) === 30 || String(p.name || '').toLowerCase() === 'monthly') ||
+            [...data].sort((a, b) => Number(a.duration_days || 0) - Number(b.duration_days || 0))[0];
+          // Set the default plan for all libraries
+          setLibraries(prev => prev.map(lib => ({ ...lib, selectedPlan: lib.selectedPlan || defaultPlan })));
         }
       } catch (err) {
-        toast.error('Failed to load subscription plans');
+        setPricingPlans([]);
+        toast.error(err?.message || 'Failed to load live subscription plans');
       } finally {
         setIsFetchingPlans(false);
       }
@@ -96,7 +618,7 @@ export default function RegisterLibrary() {
   const [comboForms, setComboForms] = useState({});
   const [showComboForms, setShowComboForms] = useState({});
 
-  const getShiftForm = (libIdx) => shiftForms[libIdx] || { label: '', start_time: '', end_time: '', fee_plans: {} };
+  const getShiftForm = (libIdx) => shiftForms[libIdx] || createEmptyShiftForm();
   const updateShiftForm = (libIdx, updater) => setShiftForms(prev => ({ ...prev, [libIdx]: typeof updater === 'function' ? updater(getShiftForm(libIdx)) : updater }));
 
   const getComboForm = (libIdx) => comboForms[libIdx] || { selectedShifts: [], combined_fee: '' };
@@ -107,8 +629,19 @@ export default function RegisterLibrary() {
     const femaleL = parseInt(lib.female_lockers) || 0;
     return (maleL + femaleL) > 0;
   });
-  const totalSteps = 8; // Fixed total steps for now: Basic, Cap, Shifts, Lockers, Contact, Students, Account, Review
-  const stepLabels = ['Basic Info', 'Capacity', 'Shifts', 'Locker', 'Contact', 'Students', 'Account', 'Review'];
+  const totalSteps = 10; // Basic, Cap, Shifts, Lockers, Contact, Students, Student Review, Accounts, Plan, Review
+  const stepLabels = [
+    'Basic Info',
+    'Capacity',
+    'Shifts',
+    'Locker',
+    'Contact',
+    'Students',
+    'Students Review',
+    'Accounts',
+    'Plan Selection',
+    'Review & Pay',
+  ];
 
   // Determine actual step mapping
   const getActualStep = () => {
@@ -128,9 +661,20 @@ export default function RegisterLibrary() {
 
   const updateLibField = (libIdx, field, value) => {
     setLibraries((prev) => {
-      const copy = [...prev];
-      copy[libIdx] = { ...copy[libIdx], [field]: value };
-      return copy;
+      return prev.map((lib, idx) => {
+        if (idx !== libIdx) return lib;
+        const nextLib = { ...lib, [field]: value };
+        if (
+          ['male_seats', 'female_seats', 'male_lockers', 'female_lockers', 'maleLockerPolicy', 'femaleLockerPolicy']
+            .includes(field)
+        ) {
+          nextLib.imported_students = recalculateImportedStudentsForLibrary(
+            nextLib,
+            nextLib.imported_students || [],
+          );
+        }
+        return nextLib;
+      });
     });
     if (errors[`${libIdx}_${field}`]) setErrors((prev) => ({ ...prev, [`${libIdx}_${field}`]: '' }));
   };
@@ -174,6 +718,26 @@ export default function RegisterLibrary() {
       
       if (lib.female_lockers === '') { e[`${i}_female_lockers`] = 'Required'; valid = false; }
       else if (femaleL < 0) { e[`${i}_female_lockers`] = '≥0'; valid = false; }
+
+      if (lib.male_lockers !== '' && lib.female_lockers !== '') {
+        const totalSeats = maleS + femaleS;
+        const totalLockers = maleL + femaleL;
+
+        if (totalLockers > totalSeats) {
+          e[`${i}_male_lockers`] = 'Total lockers must be <= total seats';
+          e[`${i}_female_lockers`] = 'Total lockers must be <= total seats';
+          valid = false;
+        } else if (maleS > 0 && femaleS > 0) {
+          if (maleL > maleS) {
+            e[`${i}_male_lockers`] = 'Male lockers must be <= male seats';
+            valid = false;
+          }
+          if (femaleL > femaleS) {
+            e[`${i}_female_lockers`] = 'Female lockers must be <= female seats';
+            valid = false;
+          }
+        }
+      }
     });
     setErrors(e);
     if (!valid) toast.error('Check capacity fields');
@@ -234,31 +798,96 @@ export default function RegisterLibrary() {
   };
 
   const validateStep6 = () => {
-    // Logic for Student Imports step validation goes here later
+    for (let libIdx = 0; libIdx < libraries.length; libIdx += 1) {
+      const lib = libraries[libIdx];
+      const students = lib.imported_students || [];
+      for (let sIdx = 0; sIdx < students.length; sIdx += 1) {
+        const student = students[sIdx];
+        const rowLabel = `Student #${sIdx + 1} in ${lib.name || `Library ${libIdx + 1}`}`;
+        if (!student.name?.trim()) {
+          toast.error(`${rowLabel}: Name is required`);
+          return false;
+        }
+        if (!/^\d{10}$/.test(String(student.phone || '').trim())) {
+          toast.error(`${rowLabel}: Phone must be 10 digits`);
+          return false;
+        }
+        if (!student.shift_id) {
+          toast.error(`${rowLabel}: Select a shift`);
+          return false;
+        }
+        if (!student.seat_number) {
+          toast.error(`${rowLabel}: No seat available for selected shift/gender`);
+          return false;
+        }
+        if (!student.admission_date || !student.end_date) {
+          toast.error(`${rowLabel}: Admission and end date are required`);
+          return false;
+        }
+      }
+    }
     return true;
   };
 
   const validateStep7 = () => {
+    return true;
+  };
+
+  const validateStep8 = () => {
     const e = {};
     let valid = true;
-    
-    // The email used is contact_email from Step 5
-    if (!libraries[0].contact_email.trim()) {
-      toast.error('Admin Email is missing. Please go back to the Contact step and provide it.');
-      return false;
-    }
+    const ownerEmail = libraries[0]?.contact_email?.trim() || '';
 
-    if (!form.adminPassword || form.adminPassword.length < 6) {
-      e.adminPassword = 'Minimum 6 characters';
-      valid = false;
-    }
-    if (form.adminPassword !== form.adminPasswordConfirm) {
-      e.adminPasswordConfirm = 'Passwords must match';
-      valid = false;
-    }
+    libraries.forEach((lib, i) => {
+      const adminEmail = (lib.admin_email || ownerEmail || '').trim();
+      if (!adminEmail) {
+        e[`${i}_admin_email`] = 'Required';
+        valid = false;
+      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail)) {
+        e[`${i}_admin_email`] = 'Invalid email';
+        valid = false;
+      }
+
+      if (!lib.admin_password?.trim()) {
+        e[`${i}_admin_password`] = 'Required';
+        valid = false;
+      } else if (lib.admin_password.trim().length < 6) {
+        e[`${i}_admin_password`] = 'Minimum 6 characters';
+        valid = false;
+      }
+
+      if (lib.staff_enabled) {
+        const staffEmail = (lib.staff_email || '').trim();
+        if (!staffEmail) {
+          e[`${i}_staff_email`] = 'Required';
+          valid = false;
+        } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(staffEmail)) {
+          e[`${i}_staff_email`] = 'Invalid email';
+          valid = false;
+        }
+
+        if (!lib.staff_password?.trim()) {
+          e[`${i}_staff_password`] = 'Required';
+          valid = false;
+        } else if (lib.staff_password.trim().length < 6) {
+          e[`${i}_staff_password`] = 'Minimum 6 characters';
+          valid = false;
+        }
+      }
+    });
 
     setErrors(e);
-    if (!valid) toast.error('Please fix the password errors');
+    if (!valid) toast.error('Please complete admin/staff credentials');
+    return valid;
+  };
+
+  const validateStep9 = () => {
+    let valid = true;
+    libraries.forEach((lib) => {
+      if (!lib.selectedPlan) valid = false;
+    });
+
+    if (!valid) toast.error('Please select a plan for every library to continue.');
     return valid;
   };
 
@@ -270,7 +899,9 @@ export default function RegisterLibrary() {
     else if (actualStep === 4) valid = validateStep4(); // Locker
     else if (actualStep === 5) valid = validateStep5(); // Contact
     else if (actualStep === 6) valid = validateStep6(); // Students
-    else if (actualStep === 7) valid = validateStep7(); // Account
+    else if (actualStep === 7) valid = validateStep7(); // Students summary
+    else if (actualStep === 8) valid = validateStep8(); // Accounts
+    else if (actualStep === 9) valid = validateStep9(); // Plan
     
     // Auto-generate combos for all libraries before moving past Step 3
     if (valid && actualStep === 3) {
@@ -302,9 +933,30 @@ export default function RegisterLibrary() {
       toast.error('Please select start and end times');
       return;
     }
-    if (!sForm.monthly_fee || parseFloat(sForm.monthly_fee) < 0) {
-      toast.error('Enter a valid monthly fee');
+    const monthOneRaw = sForm.fee_plans?.['1'];
+    const monthOneFee = monthOneRaw === '' ? NaN : Number(monthOneRaw);
+    if (Number.isNaN(monthOneFee) || monthOneFee < 0) {
+      toast.error('1 month fee is required');
       return;
+    }
+    const parsedFeePlans = { '1': monthOneFee };
+    for (const month of FEE_PLAN_MONTHS) {
+      const key = String(month);
+      if (month === 1) {
+        continue;
+      }
+      const raw = sForm.fee_plans?.[key];
+
+      if (raw === '' || raw === undefined || raw === null) {
+        continue;
+      }
+
+      const numericFee = Number(raw);
+      if (Number.isNaN(numericFee) || numericFee < 0) {
+        toast.error(`Invalid fee for ${month} month`);
+        return;
+      }
+      parsedFeePlans[key] = numericFee;
     }
 
     // Check overlap
@@ -332,15 +984,21 @@ export default function RegisterLibrary() {
       start_time: sForm.start_time,
       end_time: sForm.end_time,
       duration_hours: duration,
-      monthly_fee: parseFloat(sForm.monthly_fee),
+      monthly_fee: Number(parsedFeePlans['1']),
+      fee_plans: parsedFeePlans,
       is_base: true
     };
     setLibraries((prev) => {
       const copy = [...prev];
-      copy[libIdx] = { ...copy[libIdx], shifts: [...copy[libIdx].shifts, newShift] };
+      const nextLib = { ...copy[libIdx], shifts: [...copy[libIdx].shifts, newShift] };
+      nextLib.imported_students = recalculateImportedStudentsForLibrary(
+        nextLib,
+        nextLib.imported_students || [],
+      );
+      copy[libIdx] = nextLib;
       return copy;
     });
-    updateShiftForm(libIdx, { label: '', start_time: '', end_time: '', monthly_fee: '' });
+    updateShiftForm(libIdx, createEmptyShiftForm());
     setShowShiftForms((prev) => ({ ...prev, [libIdx]: false }));
     // updateAutoCombos is triggered on Continue, or we can call it directly
     setTimeout(() => updateAutoCombos(libIdx), 50);
@@ -349,11 +1007,16 @@ export default function RegisterLibrary() {
   const deleteShift = (libIdx, id) => {
     setLibraries((prev) => {
       const copy = [...prev];
-      copy[libIdx] = {
+      const nextLib = {
         ...copy[libIdx],
         shifts: copy[libIdx].shifts.filter((s) => s.id !== id),
         combinedPricing: copy[libIdx].combinedPricing.filter((c) => !c.shift_ids.includes(id)),
       };
+      nextLib.imported_students = recalculateImportedStudentsForLibrary(
+        nextLib,
+        nextLib.imported_students || [],
+      );
+      copy[libIdx] = nextLib;
       return copy;
     });
     setTimeout(() => updateAutoCombos(libIdx), 50);
@@ -388,17 +1051,39 @@ export default function RegisterLibrary() {
 
           if (consecutive) {
             const shiftIds = slice.map(s => s.id);
-            const defaultFee = slice.reduce((sum, s) => sum + s.monthly_fee, 0);
+            const defaultFeePlans = Object.fromEntries(
+              FEE_PLAN_MONTHS.map((month) => {
+                const monthValues = slice.map((shift) => getShiftPlanAmount(shift, month));
+                const allAvailable = monthValues.every(
+                  (value) => value !== null && value !== undefined && !Number.isNaN(Number(value)),
+                );
+                if (!allAvailable) return [String(month), ''];
+                return [String(month), monthValues.reduce((sum, value) => sum + Number(value), 0)];
+              }),
+            );
+            const defaultFee = Number(defaultFeePlans['1']) || 0;
             const label = slice.map(s => s.label).join(' + ');
 
             const existing = existingCombos.find(c => c.shift_ids.length === shiftIds.length && c.shift_ids.every((id, idx) => id === shiftIds[idx]));
+            const existingCustomPlans = normalizeFeePlans(existing?.custom_fee_plans || {});
+            if (
+              existing &&
+              (existingCustomPlans['1'] === '' || existingCustomPlans['1'] === null) &&
+              existing.custom_fee !== '' &&
+              existing.custom_fee !== null &&
+              existing.custom_fee !== undefined
+            ) {
+              existingCustomPlans['1'] = String(existing.custom_fee);
+            }
             
             newCombos.push({
               id: existing ? existing.id : `combo-${Date.now()}-${Math.random().toString(36).substring(2,9)}`,
               shift_ids: shiftIds,
               label: label,
               default_fee: defaultFee,
+              default_fee_plans: defaultFeePlans,
               custom_fee: existing ? existing.custom_fee : '',
+              custom_fee_plans: existing ? existingCustomPlans : createEmptyFeePlans(),
               is_offered: existing ? existing.is_offered : false,
               start_time: slice[0].start_time,
               end_time: slice[slice.length - 1].end_time,
@@ -408,119 +1093,538 @@ export default function RegisterLibrary() {
         }
       }
 
-      copy[libIdx] = { ...lib, combinedPricing: newCombos };
+      const nextLib = { ...lib, combinedPricing: newCombos };
+      nextLib.imported_students = recalculateImportedStudentsForLibrary(
+        nextLib,
+        nextLib.imported_students || [],
+      );
+      copy[libIdx] = nextLib;
       return copy;
     });
   };
 
   const toggleComboOffered = (libIdx, comboId) => {
-    setLibraries((prev) => {
-      const copy = [...prev];
-      copy[libIdx].combinedPricing = copy[libIdx].combinedPricing.map(c => 
-        c.id === comboId ? { ...c, is_offered: !c.is_offered } : c
-      );
-      return copy;
-    });
+    setLibraries((prev) =>
+      prev.map((lib, idx) => {
+        if (idx !== libIdx) return lib;
+        const nextCombinedPricing = (lib.combinedPricing || []).map((combo) => {
+          if (combo.id !== comboId) return combo;
+          const nextIsOffered = !Boolean(combo.is_offered);
+          const nextCustomPlans = normalizeFeePlans(combo.custom_fee_plans || {});
+          const defaultMonthOne = combo.default_fee_plans?.['1'] ?? combo.default_fee ?? '';
+          const shouldSeedCustomFee =
+            nextIsOffered &&
+            (nextCustomPlans['1'] === '' ||
+              nextCustomPlans['1'] === null ||
+              nextCustomPlans['1'] === undefined);
+          if (shouldSeedCustomFee) {
+            nextCustomPlans['1'] = String(defaultMonthOne);
+          }
+          return {
+            ...combo,
+            is_offered: nextIsOffered,
+            custom_fee_plans: nextCustomPlans,
+            custom_fee: nextCustomPlans['1'] ?? combo.custom_fee,
+          };
+        });
+        const nextLib = {
+          ...lib,
+          combinedPricing: nextCombinedPricing,
+        };
+        return {
+          ...nextLib,
+          imported_students: recalculateImportedStudentsForLibrary(
+            nextLib,
+            nextLib.imported_students || [],
+          ),
+        };
+      }),
+    );
   };
 
-  const updateComboCustomFee = (libIdx, comboId, fee) => {
-    setLibraries((prev) => {
-      const copy = [...prev];
-      copy[libIdx].combinedPricing = copy[libIdx].combinedPricing.map(c => 
-        c.id === comboId ? { ...c, custom_fee: fee } : c
-      );
-      return copy;
-    });
+  const updateComboCustomFee = (libIdx, comboId, month, fee) => {
+    setLibraries((prev) =>
+      prev.map((lib, idx) =>
+        idx === libIdx
+          ? (() => {
+              const monthKey = String(month);
+              const nextCombinedPricing = (lib.combinedPricing || []).map((combo) => {
+                if (combo.id !== comboId) return combo;
+                const nextPlans = {
+                  ...normalizeFeePlans(combo.custom_fee_plans || {}),
+                  [monthKey]: fee,
+                };
+                return {
+                  ...combo,
+                  custom_fee_plans: nextPlans,
+                  custom_fee: monthKey === '1' ? fee : combo.custom_fee,
+                };
+              });
+              const nextLib = { ...lib, combinedPricing: nextCombinedPricing };
+              return {
+                ...nextLib,
+                imported_students: recalculateImportedStudentsForLibrary(
+                  nextLib,
+                  nextLib.imported_students || [],
+                ),
+              };
+            })()
+          : lib,
+      ),
+    );
   };
 
   /* ─── Student Import helpers ─── */
   const addStudent = (libIdx) => {
     setLibraries((prev) => {
-      const copy = [...prev];
-      copy[libIdx].imported_students = [
-        ...copy[libIdx].imported_students,
-        {
-          id: Date.now().toString(),
-          name: '',
-          father_name: '',
-          phone: '',
-          address: '',
-          gender: 'male',
-          shift_id: '',
-          seat_number: '',
-          has_locker: false,
-          locker_no: '',
-          plan_duration: '1',
-          amount_paid: '',
-          payment_status: 'paid'
-        }
-      ];
-      return copy;
+      return prev.map((lib, idx) => {
+        if (idx !== libIdx) return lib;
+        const nextStudents = recalculateImportedStudentsForLibrary(lib, [
+          ...(lib.imported_students || []),
+          createStudentRow(),
+        ]);
+        return { ...lib, imported_students: nextStudents };
+      });
     });
   };
 
   const removeStudent = (libIdx, sIdx) => {
     setLibraries((prev) => {
-      const copy = [...prev];
-      copy[libIdx].imported_students = copy[libIdx].imported_students.filter((_, i) => i !== sIdx);
-      return copy;
+      return prev.map((lib, idx) => {
+        if (idx !== libIdx) return lib;
+        const filtered = (lib.imported_students || []).filter((_, i) => i !== sIdx);
+        const nextStudents = recalculateImportedStudentsForLibrary(lib, filtered);
+        return { ...lib, imported_students: nextStudents };
+      });
     });
   };
 
   const updateStudent = (libIdx, sIdx, field, value) => {
     setLibraries((prev) => {
-      const copy = [...prev];
-      copy[libIdx].imported_students = copy[libIdx].imported_students.map((s, i) => 
-        i === sIdx ? { ...s, [field]: value } : s
-      );
-      return copy;
+      return prev.map((lib, idx) => {
+        if (idx !== libIdx) return lib;
+        const updatedRows = (lib.imported_students || []).map((student, i) => (
+          i === sIdx ? { ...student, [field]: value } : student
+        ));
+        const nextStudents = recalculateImportedStudentsForLibrary(lib, updatedRows);
+        return { ...lib, imported_students: nextStudents };
+      });
     });
   };
 
+  const downloadStudentCsvTemplate = (libIdx) => {
+    const lib = libraries[libIdx];
+
+    const shiftOptions = [
+      ...(lib?.shifts || []).map((shift) => ({
+        id: shift.id,
+        label: shift.label,
+        duration_hours: Number(shift.duration_hours) || 0,
+      })),
+      ...((lib?.combinedPricing || [])
+        .filter((combo) => combo.is_offered)
+        .map((combo) => ({
+          id: combo.id,
+          label: combo.label,
+          duration_hours: Number(combo.duration_hours) || 0,
+        }))),
+    ];
+
+    const fallbackShifts = [
+      { label: 'Morning', duration_hours: 5 },
+      { label: 'After Noon', duration_hours: 5 },
+    ];
+    const templateShifts = shiftOptions.length > 0 ? shiftOptions : fallbackShifts;
+
+    const getLockerSample = (gender, shiftMeta) => {
+      const lockerPolicy = getLockerPolicyForStudent(lib, gender);
+      const lockerPool = getLockerPoolForStudent(lib, gender);
+      const isEligible =
+        Boolean(lockerPolicy) &&
+        lockerPool.length > 0 &&
+        isLockerRuleEligible(lockerPolicy.eligible_shift_type, Number(shiftMeta?.duration_hours) || 0);
+
+      return {
+        has_locker: isEligible ? 'yes' : 'no',
+        locker_no: isEligible ? lockerPool[0] || '' : '',
+      };
+    };
+
+    const firstShift = templateShifts[0];
+    const secondShift = templateShifts[1] || templateShifts[0];
+    const thirdShift = templateShifts[2] || templateShifts[0];
+
+    const maleLockerSample = getLockerSample('male', firstShift);
+    const femaleLockerSample = getLockerSample('female', secondShift);
+
+    const sampleRecords = [
+      {
+        name: 'Aman Kumar',
+        father_name: 'Rakesh Kumar',
+        phone: '9876543210',
+        gender: 'male',
+        address: 'House 11, Main Road, Patna',
+        shift_label: firstShift.label,
+        plan_duration: '1',
+        admission_date: getTodayDateISO(),
+        payment_status: 'paid',
+        has_locker: maleLockerSample.has_locker,
+        locker_no: maleLockerSample.locker_no,
+      },
+      {
+        name: 'Priya Sharma',
+        father_name: 'Mahesh Sharma',
+        phone: '9876500011',
+        gender: 'female',
+        address: 'Flat 4B, Lake View, Ranchi',
+        shift_label: secondShift.label,
+        plan_duration: '3',
+        admission_date: getTodayDateISO(),
+        payment_status: 'pending',
+        has_locker: femaleLockerSample.has_locker,
+        locker_no: femaleLockerSample.locker_no,
+      },
+      {
+        name: 'Rohit Verma',
+        father_name: '',
+        phone: '9876500022',
+        gender: 'male',
+        address: '',
+        shift_label: thirdShift.label,
+        plan_duration: '6',
+        admission_date: getTodayDateISO(),
+        payment_status: 'paid',
+        has_locker: 'yes',
+        locker_no: '',
+      },
+      {
+        name: 'Naina Singh',
+        father_name: '',
+        phone: '9876500033',
+        gender: 'female',
+        address: 'Near Station Road, Lucknow',
+        shift_label: secondShift.label,
+        plan_duration: '',
+        admission_date: '',
+        payment_status: '',
+        has_locker: 'no',
+        locker_no: '',
+      },
+    ];
+
+    const sampleRows = [
+      STUDENT_CSV_HEADERS.join(','),
+      ...sampleRecords.map((record) =>
+        STUDENT_CSV_HEADERS.map((header) => toCsvCell(record[header])).join(','),
+      ),
+    ];
+
+    const csvBlob = new Blob([sampleRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const blobUrl = URL.createObjectURL(csvBlob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    const safeLibraryName = String(lib?.name || `library_${libIdx + 1}`)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || `library_${libIdx + 1}`;
+    link.download = `students-import-template-${safeLibraryName}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(blobUrl);
+
+    if (shiftOptions.length === 0) {
+      toast('Template downloaded with default shift labels. Add shifts first for exact labels.');
+    }
+  };
+
+  const handleStudentCsvUpload = async (libIdx, file) => {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const rows = parseCsvText(text);
+      if (rows.length < 2) {
+        toast.error('CSV must contain a header and at least one student row');
+        return;
+      }
+
+      const normalizedHeaders = rows[0].map(normalizeCsvHeader);
+      const findHeaderIndex = (key) => {
+        const aliases = CSV_HEADER_ALIASES[key] || [key];
+        return normalizedHeaders.findIndex((header) => aliases.includes(header));
+      };
+
+      const requiredColumns = ['name', 'phone', 'gender', 'shift_label'];
+      const missingColumns = requiredColumns.filter((column) => findHeaderIndex(column) === -1);
+      if (missingColumns.length > 0) {
+        toast.error(`Missing CSV columns: ${missingColumns.join(', ')}`);
+        return;
+      }
+
+      let importedCount = 0;
+      let skippedCount = 0;
+
+      setLibraries((prev) =>
+        prev.map((lib, idx) => {
+          if (idx !== libIdx) return lib;
+
+          const shiftOptions = [
+            ...(lib.shifts || []).map((shift) => ({ id: shift.id, label: shift.label })),
+            ...(lib.combinedPricing || [])
+              .filter((combo) => combo.is_offered)
+              .map((combo) => ({ id: combo.id, label: combo.label })),
+          ];
+
+          const resolveShiftIdByLabel = (label) => {
+            const normalizedLabel = String(label || '').trim().toLowerCase();
+            if (!normalizedLabel) return '';
+            const matched = shiftOptions.find(
+              (option) => option.label.trim().toLowerCase() === normalizedLabel,
+            );
+            return matched?.id || '';
+          };
+
+          const newStudents = [];
+
+          for (let rowIndex = 1; rowIndex < rows.length; rowIndex += 1) {
+            const row = rows[rowIndex];
+
+            const getCellValue = (key) => {
+              const cellIndex = findHeaderIndex(key);
+              if (cellIndex === -1) return '';
+              return String(row[cellIndex] || '').trim();
+            };
+
+            const name = getCellValue('name');
+            const phone = getCellValue('phone');
+            const shiftLabel = getCellValue('shift_label');
+            const shiftId = resolveShiftIdByLabel(shiftLabel);
+
+            if (!name && !phone && !shiftLabel) {
+              skippedCount += 1;
+              continue;
+            }
+
+            if (!name || !phone || !shiftId) {
+              skippedCount += 1;
+              continue;
+            }
+
+            const admissionDateRaw = getCellValue('admission_date');
+            const parsedAdmissionDate = /^\d{4}-\d{2}-\d{2}$/.test(admissionDateRaw)
+              ? admissionDateRaw
+              : getTodayDateISO();
+            const duration = normalizeDurationMonths(getCellValue('plan_duration'));
+
+            newStudents.push(
+              createStudentRow({
+                name,
+                father_name: getCellValue('father_name'),
+                phone,
+                gender: normalizeStudentGender(getCellValue('gender')),
+                address: getCellValue('address'),
+                shift_id: shiftId,
+                plan_duration: String(duration),
+                admission_date: parsedAdmissionDate,
+                payment_status: normalizePaymentStatus(getCellValue('payment_status')),
+                has_locker: parseCsvBoolean(getCellValue('has_locker')),
+                locker_no: getCellValue('locker_no'),
+              }),
+            );
+            importedCount += 1;
+          }
+
+          const nextStudents = recalculateImportedStudentsForLibrary(lib, [
+            ...(lib.imported_students || []),
+            ...newStudents,
+          ]);
+
+          return { ...lib, imported_students: nextStudents };
+        }),
+      );
+
+      if (importedCount === 0) {
+        toast.error('No valid student rows found in CSV');
+      } else if (skippedCount > 0) {
+        toast.success(`Imported ${importedCount} students. Skipped ${skippedCount} invalid rows.`);
+      } else {
+        toast.success(`Imported ${importedCount} students successfully.`);
+      }
+    } catch (error) {
+      toast.error('Failed to parse CSV file');
+    } finally {
+      const inputNode = studentCsvInputRefs.current[libIdx];
+      if (inputNode) inputNode.value = '';
+    }
+  };
+
+  /* ─── Promo helpers ─── */
+  const applyPromo = async () => {
+    if (!promoInput.trim()) return;
+    setIsVerifyingPromo(true);
+    setPromoError('');
+    try {
+      // Simulate API call for now
+      await new Promise(r => setTimeout(r, 600));
+      if (promoInput.toUpperCase() === 'WELCOME500') {
+        setPromoDiscount(500);
+        setPromoCode('WELCOME500');
+        toast.success('Promo code applied successfully!');
+      } else {
+        setPromoError('Invalid or expired promo code');
+      }
+    } finally {
+      setIsVerifyingPromo(false);
+    }
+  };
+
+  const removePromo = () => {
+    setPromoDiscount(0);
+    setPromoCode('');
+    setPromoInput('');
+    setPromoError('');
+  };
+
   /* ─── Submit ─── */
-  const handleSubmit = async () => {
-    if (!validateStep5()) return;
-    if (!validateStep7()) return; // Validate admin password before submission
+  const handlePay = async () => {
+    if (!validateStep8() || !validateStep9()) return;
     if (!confirmed) {
       toast.error('Please confirm the details');
       return;
     }
+    
     setIsSubmitting(true);
     setSubmitError('');
+    
     try {
-      let successCount = 0;
-      for (const lib of libraries) {
-        const payload = {
-          name: lib.name.trim(),
-          address: lib.address.trim(),
-          city: lib.city.trim(),
-          state: lib.state.trim(),
-          pincode: lib.pincode.trim(),
-          total_seats: parseInt(lib.total_seats),
-          total_girls_seats: parseInt(lib.total_girls_seats) || 0,
-          total_lockers: parseInt(lib.total_lockers) || 0,
-          contact_phone: libraries[0].contact_phone.trim(),
-          contact_email: libraries[0].contact_email.trim(),
-          admin_password: form.adminPassword, // To be handled carefully by Edge function
-          shifts: lib.shifts.map(({ id, ...s }) => s),
-          combined_pricing: lib.hasCombinedPricing
-            ? lib.combinedPricing.map(({ id, selectedShifts, ...c }) => c)
-            : [],
-          locker_policy:
-            parseInt(lib.total_lockers) > 0
+      // Placeholder structure for processing before payment API Integration (Phase 3)
+      const payload = {
+        contact_phone: libraries[0].contact_phone.trim(),
+        contact_email: libraries[0].contact_email.trim(),
+        promo_code: promoDiscount > 0 ? promoCode : null,
+        libraries: libraries.map(lib => {
+          const mLockers = parseInt(lib.male_lockers) || 0;
+          const fLockers = parseInt(lib.female_lockers) || 0;
+          
+          const locker_policies = [];
+          if (mLockers > 0) locker_policies.push({ ...lib.maleLockerPolicy, gender: 'male', monthly_fee: parseFloat(lib.maleLockerPolicy.monthly_fee) || 0 });
+          if (fLockers > 0) locker_policies.push({ ...lib.femaleLockerPolicy, gender: 'female', monthly_fee: parseFloat(lib.femaleLockerPolicy.monthly_fee) || 0 });
+          
+          return {
+            name: lib.name.trim(),
+            address: lib.address.trim(),
+            city: lib.city.trim(),
+            state: lib.state.trim(),
+            pincode: lib.pincode.trim(),
+            
+            male_seats: parseInt(lib.male_seats) || 0,
+            female_seats: parseInt(lib.female_seats) || 0,
+            male_lockers: mLockers,
+            female_lockers: fLockers,
+            
+            shifts: lib.shifts.map(({ id, ...s }) => ({ ...s, is_base: true })),
+            combined_pricing: lib.combinedPricing
+              ? lib.combinedPricing
+                  .filter((combo) => combo.is_offered)
+                  .map(({ id, custom_fee_plans, default_fee_plans, ...combo }) => ({
+                    ...combo,
+                    custom_fee_plans: compactPlanPayload(custom_fee_plans || {}),
+                    default_fee_plans: compactPlanPayload(default_fee_plans || {}),
+                    custom_fee:
+                      custom_fee_plans?.['1'] !== '' &&
+                      custom_fee_plans?.['1'] !== null &&
+                      custom_fee_plans?.['1'] !== undefined
+                        ? Number(custom_fee_plans['1'])
+                        : combo.custom_fee,
+                    combined_fee:
+                      custom_fee_plans?.['1'] !== '' &&
+                      custom_fee_plans?.['1'] !== null &&
+                      custom_fee_plans?.['1'] !== undefined
+                        ? Number(custom_fee_plans['1'])
+                        : combo.default_fee,
+                  }))
+              : [],
+            locker_policies,
+            
+            imported_students: (lib.imported_students || []).map((student) => ({
+              ...student,
+              shift_ids: resolveStudentShiftIds(lib, student),
+            })),
+            admin_account: {
+              email: (lib.admin_email || libraries[0].contact_email || '').trim(),
+              password: lib.admin_password || '',
+              role: 'library_admin',
+            },
+            staff_account: lib.staff_enabled
               ? {
-                  eligible_shift_type: lib.lockerPolicy.eligible_shift_type,
-                  monthly_fee: parseFloat(lib.lockerPolicy.monthly_fee) || 0,
-                  description: lib.lockerPolicy.description.trim(),
+                  email: (lib.staff_email || '').trim(),
+                  password: lib.staff_password || '',
+                  role: 'staff',
+                  permissions: ['view_data', 'admission', 'collect_payment'],
                 }
               : null,
-        };
-        await registerLibrary(payload);
-        successCount++;
+            selected_plan_id: lib.selectedPlan?.id,
+            duration_days: lib.selectedPlan?.duration_days
+          };
+        }),
+      };
+      
+      console.log('Final Payload prepared for the API:', payload);
+      
+      // 1. Register Libraries (Batch)
+      const registerRes = await registerLibraryBatch(payload);
+      const libraryIds = registerRes.library_ids;
+
+      if (!libraryIds || libraryIds.length === 0) {
+        throw new Error("No libraries returned from registration");
       }
-      toast.success(`${successCount} ${successCount === 1 ? 'library' : 'libraries'} registered successfully!`);
-      navigate('/register/success');
+
+      // Prepare plan selections for createPaymentOrder
+      const planSelections = {};
+      payload.libraries.forEach((lib, idx) => {
+        const mappedLibraryId = libraryIds[idx];
+        if (!mappedLibraryId) return;
+        planSelections[mappedLibraryId] = {
+          plan_id: lib.selected_plan_id ?? null,
+          duration_days: Number(lib.duration_days) || null,
+          name: lib.selectedPlan?.name || null,
+          label: lib.selectedPlan?.label || null,
+        };
+      });
+
+      // 2. Create Payment Order
+      const orderRes = await createPaymentOrder(
+        libraryIds,
+        planSelections,
+        promoDiscount > 0 ? promoCode : null
+      );
+
+      // 3. Razorpay Checkout (Simulated for now if RAZORPAY_KEY is missing, but structure is ready)
+      // Since we don't have the Razorpay SDK actually opening a popup right now without valid keys,
+      // we'll mock the checkout success for demonstration, then call verifyPayment.
+      const mockPaymentId = `pay_mock_${Date.now()}`;
+      const mockSignature = "mock_signature_for_testing";
+
+      // 4. Verify Payment
+      const verifyPayload = {
+        razorpay_order_id: orderRes.order_id,
+        razorpay_payment_id: mockPaymentId,
+        razorpay_signature: mockSignature,
+        library_ids: libraryIds,
+        libraries_payload: payload.libraries, // Needed to insert imported_students
+      };
+
+      const verifyRes = await verifyPayment(verifyPayload);
+
+      toast.success(`${libraries.length} ${libraries.length === 1 ? 'library' : 'libraries'} registered successfully!`);
+      
+      navigate('/register/success', { 
+        state: { credentials: verifyRes.credentials }
+      });
+      
     } catch (err) {
+      console.error(err);
       setSubmitError(err.message || 'Something went wrong');
       toast.error(err.message || 'Registration failed');
     } finally {
@@ -530,7 +1634,7 @@ export default function RegisterLibrary() {
 
   /* ─── Library tab helpers ─── */
   const addNewLibrary = () => {
-    setLibraries((prev) => [...prev, { ...initialForm }]);
+    setLibraries((prev) => [...prev, createInitialLibraryForm()]);
     setActiveLibIndex(libraries.length);
     setPincodeStatus('');
     setStep(1); // Force back to step 1 to fill basic info
@@ -568,7 +1672,7 @@ export default function RegisterLibrary() {
 
   return (
     <div className="register-page">
-      <div className="register-topbar">
+          <div className="register-topbar">
         <div className="container">
           <div className="register-topbar-inner">
             <Link to="/" className="nav-logo no-underline">
@@ -576,7 +1680,7 @@ export default function RegisterLibrary() {
               <span>LibraryOS</span>
             </Link>
             <span className="text-sm font-medium text-muted">
-              Step {step} of {totalSteps}
+              Step {actualStep} of {totalSteps}
             </span>
           </div>
         </div>
@@ -648,7 +1752,7 @@ export default function RegisterLibrary() {
         </aside>
 
         <section className="register-stage">
-          <StepIndicator currentStep={step} totalSteps={totalSteps} labels={stepLabels} />
+          <StepIndicator currentStep={actualStep} totalSteps={totalSteps} labels={stepLabels} />
 
           <div className="card reveal visible register-card">
           {/* ─── Step 1: Basic Info ─── */}
@@ -840,7 +1944,17 @@ export default function RegisterLibrary() {
                       {/* Added shifts cards */}
                       {lib.shifts.length > 0 && (
                         <div className="shift-cards-grid mb-6">
-                          {lib.shifts.map((s) => (
+                          {lib.shifts.map((s) => {
+                            const configuredEntries = getConfiguredPlanEntries(s.fee_plans);
+                            const fallbackMonthOne = getShiftPlanAmount(s, 1);
+                            const planEntries =
+                              configuredEntries.length > 0
+                                ? configuredEntries
+                                : fallbackMonthOne !== null
+                                  ? [{ month: 1, amount: Number(fallbackMonthOne) }]
+                                  : [];
+
+                            return (
                             <div key={s.id} className="shift-card-item">
                               <div className="shift-card-header">
                                 <div className="shift-card-title-row">
@@ -857,12 +1971,23 @@ export default function RegisterLibrary() {
                                 <span className="shift-duration-badge">{s.duration_hours}h</span>
                               </div>
                               <div className="shift-card-plans flex gap-2">
-                                <span className="shift-plan-tag bg-green-50 text-green-700 font-medium px-3 py-1 rounded-full text-sm">
-                                  ₹{s.monthly_fee} / month
-                                </span>
+                                {planEntries.length === 0 ? (
+                                  <span className="shift-plan-tag bg-slate-50 text-slate-600 font-medium px-3 py-1 rounded-full text-sm">
+                                    No pricing set
+                                  </span>
+                                ) : (
+                                  planEntries.map((entry) => (
+                                    <span
+                                      key={`${s.id}-plan-${entry.month}`}
+                                      className="shift-plan-tag bg-green-50 text-green-700 font-medium px-3 py-1 rounded-full text-sm"
+                                    >
+                                      {entry.month}M: ₹{entry.amount}
+                                    </span>
+                                  ))
+                                )}
                               </div>
                             </div>
-                          ))}
+                          )})}
                         </div>
                       )}
 
@@ -984,20 +2109,40 @@ export default function RegisterLibrary() {
                             </div>
                           </div>
 
-                          {/* Section 3: Monthly Fee */}
+                          {/* Section 3: Fee Plans */}
                           <div className="form-group mb-6">
                             <label className="form-label flex items-center gap-2">
                               <span className="material-symbols-rounded icon-sm text-green-600">payments</span>
-                              Monthly Fee (₹)
+                              Fee Plans (₹)
                             </label>
-                            <input
-                              type="number"
-                              className="form-input bg-white w-full max-w-xs"
-                              min="0"
-                              placeholder="e.g. 500"
-                              value={shiftForm.monthly_fee}
-                              onChange={(e) => updateShiftForm(libIdx, (p) => ({ ...p, monthly_fee: e.target.value }))}
-                            />
+                            <p className="text-xs text-muted mb-3">
+                              Only 1 month is required. Months 2-12 are optional and saved only if entered.
+                            </p>
+                            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+                              {FEE_PLAN_MONTHS.map((month) => (
+                                <div key={month} className="form-group mb-0">
+                                  <label className="form-label text-[11px] leading-tight">
+                                    {month}M{month === 1 ? ' *' : ''}
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    className="form-input bg-white text-xs px-2 py-1.5 h-9"
+                                    placeholder={month === 1 ? '500' : 'optional'}
+                                    value={shiftForm.fee_plans?.[String(month)] ?? ''}
+                                    onChange={(e) =>
+                                      updateShiftForm(libIdx, (p) => ({
+                                        ...p,
+                                        fee_plans: {
+                                          ...normalizeFeePlans(p.fee_plans),
+                                          [String(month)]: e.target.value,
+                                        },
+                                      }))
+                                    }
+                                  />
+                                </div>
+                              ))}
+                            </div>
                           </div>
 
                           {/* Actions */}
@@ -1025,57 +2170,80 @@ export default function RegisterLibrary() {
                               Auto-Generated Combinations
                             </h4>
                             <p className="text-sm text-muted mt-1">
-                              We've generated these consecutive shift combinations automatically. Toggle them on if you offer them.
+                              Consecutive shift combinations are generated automatically. Enable only the ones you offer and set pricing.
                             </p>
                           </div>
 
                           {lib.combinedPricing && lib.combinedPricing.length > 0 ? (
-                            <div className="grid gap-4 sm:grid-cols-2 px-6 pb-6">
-                              {lib.combinedPricing.map((combo) => (
-                                <div key={combo.id} className={`p-4 rounded-xl transition-all ${combo.is_offered ? 'bg-amber-50 shadow-sm' : 'bg-white opacity-70'}`} style={{ border: `1px solid ${combo.is_offered ? 'var(--color-amber)' : 'var(--color-border)'}` }}>
+                            <div className="grid gap-3 px-4 pb-4">
+                              {lib.combinedPricing.map((combo) => {
+                                const isOffered = Boolean(combo.is_offered);
+                                return (
+                                <div key={combo.id} className={`p-4 rounded-xl transition-all ${isOffered ? 'bg-amber-50 shadow-sm' : 'bg-white opacity-70'}`} style={{ border: `1px solid ${isOffered ? 'var(--color-amber)' : 'var(--color-border)'}` }}>
                                   <div className="flex items-start justify-between mb-3">
-                                    <div>
-                                      <h5 className="font-bold text-navy text-base">{combo.label}</h5>
+                                    <div style={{ minWidth: 0, flex: 1, paddingRight: '0.75rem' }}>
+                                      <h5 className="font-bold text-navy text-base" style={{ overflowWrap: 'anywhere' }}>{combo.label}</h5>
                                       <div className="text-sm text-muted flex items-center gap-1 mt-1">
                                         <span className="material-symbols-rounded icon-sm">schedule</span>
                                         {formatTime12(combo.start_time)} – {formatTime12(combo.end_time)}
                                         <span className="ml-2 font-medium bg-slate-100 px-2 py-0.5 rounded text-xs">{combo.duration_hours}h</span>
                                       </div>
+                                      <p className="text-xs text-slate-500 mt-2">
+                                        Name and timing are auto-generated. Only set the pricing.
+                                      </p>
                                     </div>
-                                    <label className="switch">
-                                      <input 
-                                        type="checkbox" 
-                                        checked={combo.is_offered}
-                                        onChange={() => toggleComboOffered(libIdx, combo.id)}
-                                      />
-                                      <span className="slider round"></span>
-                                    </label>
+                                    <button
+                                      type="button"
+                                      className={`btn btn-sm ${isOffered ? 'btn-primary' : 'btn-secondary'}`}
+                                      onClick={() => toggleComboOffered(libIdx, combo.id)}
+                                      aria-pressed={isOffered}
+                                    >
+                                      {isOffered ? 'Enabled' : 'Enable'}
+                                    </button>
                                   </div>
 
-                                  {combo.is_offered && (
-                                    <div className="mt-4 pt-4 flex items-center justify-between" style={{ borderTop: '1px solid var(--color-border)' }}>
-                                      <div className="text-sm">
-                                        <span className="text-muted block text-xs mb-1">Default (Sum)</span>
-                                        <span className="line-through text-slate-400">₹{combo.default_fee}</span>
-                                      </div>
-                                      <div className="text-right flex items-center gap-2">
-                                        <label className="text-sm font-bold text-navy">Offer Price:</label>
-                                        <div className="relative">
-                                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 font-medium">₹</span>
-                                          <input
-                                            type="number"
-                                            className="form-input py-1.5 pl-7 pr-3 w-28 text-right font-bold text-green-700 bg-white"
-                                            style={{ borderColor: 'var(--color-amber)', outlineColor: 'var(--color-amber)' }}
-                                            placeholder={combo.default_fee}
-                                            value={combo.custom_fee}
-                                            onChange={(e) => updateComboCustomFee(libIdx, combo.id, e.target.value)}
-                                          />
-                                        </div>
+                                  {isOffered && (
+                                    <div className="mt-4 pt-4" style={{ borderTop: '1px solid var(--color-border)' }}>
+                                      <p className="text-xs text-slate-500 mb-2">
+                                        Set offer pricing for durations from 1 to 12 months. Only filled values are saved.
+                                      </p>
+                                      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+                                        {FEE_PLAN_MONTHS.map((month) => {
+                                          const monthKey = String(month);
+                                          const defaultValue = combo.default_fee_plans?.[monthKey];
+                                          const customValue = combo.custom_fee_plans?.[monthKey] ?? '';
+                                          return (
+                                            <div key={`${combo.id}-${monthKey}`} className="form-group mb-0">
+                                              <label className="form-label text-[11px] leading-tight">
+                                                {month}M{month === 1 ? ' *' : ''}
+                                              </label>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                className="form-input bg-white text-xs px-2 py-1.5 h-9"
+                                                placeholder={
+                                                  defaultValue !== '' && defaultValue !== null && defaultValue !== undefined
+                                                    ? String(defaultValue)
+                                                    : 'optional'
+                                                }
+                                                value={customValue}
+                                                onChange={(e) =>
+                                                  updateComboCustomFee(
+                                                    libIdx,
+                                                    combo.id,
+                                                    monthKey,
+                                                    e.target.value,
+                                                  )
+                                                }
+                                              />
+                                            </div>
+                                          );
+                                        })}
                                       </div>
                                     </div>
                                   )}
                                 </div>
-                              ))}
+                              )})}
                             </div>
                           ) : (
                             <div className="p-6 m-6 bg-slate-50 rounded-xl text-center" style={{ border: '1px solid var(--color-border)' }}>
@@ -1266,176 +2434,591 @@ export default function RegisterLibrary() {
                 Add your current members here so their attendance, seats, and payments are tracked immediately.
               </p>
 
-              {libraries.map((lib, libIdx) => (
-                <div key={libIdx} className="mb-10">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-bold text-navy text-lg">{lib.name || `Library ${libIdx + 1}`} Students</h3>
-                    <button
-                      className="btn btn-secondary"
-                      onClick={() => addStudent(libIdx)}
-                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
-                    >
-                      <span className="material-symbols-rounded icon-sm">person_add</span> Add Student
-                    </button>
+              <div className="students-shell">
+                {libraries.map((lib, libIdx) => {
+                  const availableShiftLabels = [
+                    ...(lib.shifts || []).map((shift) => shift.label),
+                    ...((lib.combinedPricing || [])
+                      .filter((combo) => combo.is_offered)
+                      .map((combo) => combo.label)),
+                  ];
+                  const hasAnyLockerConfigured =
+                    (Number(lib.male_lockers) || 0) + (Number(lib.female_lockers) || 0) > 0;
+
+                  return (
+                  <div key={libIdx} className="students-library-block">
+                    <div className="students-library-header">
+                      <h3 className="students-library-title">{lib.name || `Library ${libIdx + 1}`} Students</h3>
+                      <div className="students-library-actions">
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => addStudent(libIdx)}
+                        >
+                          <span className="material-symbols-rounded icon-sm">person_add</span> Add Student
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => studentCsvInputRefs.current[libIdx]?.click()}
+                        >
+                          <span className="material-symbols-rounded icon-sm">upload_file</span> Upload CSV
+                        </button>
+                        <input
+                          type="file"
+                          accept=".csv,text/csv"
+                          className="hidden"
+                          ref={(node) => {
+                            if (node) studentCsvInputRefs.current[libIdx] = node;
+                          }}
+                          onChange={(e) => handleStudentCsvUpload(libIdx, e.target.files?.[0])}
+                        />
+                      </div>
+                    </div>
+                    <div className="students-csv-help">
+                      <span className="students-csv-meta">
+                        CSV headers: {STUDENT_CSV_HEADERS.join(', ')}. Valid shift_label values for this library: {availableShiftLabels.length > 0 ? availableShiftLabels.join(' | ') : 'Add shifts first'}.
+                        {' '}
+                        Locker values: has_locker accepts yes/no (or true/false). locker_no is optional (example: ML1, FL1). {hasAnyLockerConfigured ? 'Locker assignment still follows configured locker policy and eligibility rules.' : 'No lockers configured, so keep has_locker as no/blank.'}
+                      </span>
+                      <button
+                        type="button"
+                        className="students-template-btn"
+                        onClick={() => downloadStudentCsvTemplate(libIdx)}
+                      >
+                        Download Template
+                      </button>
+                    </div>
+
+                    {lib.imported_students.length === 0 ? (
+                      <div
+                        className="students-empty-state"
+                        style={{ border: '1px dashed var(--color-border)', background: 'var(--color-surface-light)' }}
+                      >
+                        <span className="material-symbols-rounded icon-lg" style={{ color: 'var(--color-border-hover)' }}>group_off</span>
+                        <p className="students-empty-title">No students added yet.</p>
+                        <p className="students-empty-subtitle">Click the button above to import a student.</p>
+                      </div>
+                    ) : (
+                      <div className="students-list">
+                        {lib.imported_students.map((student, sIdx) => {
+                          return (
+                            <article key={`student-${libIdx}-${sIdx}`} className="student-entry-card">
+                              <div className="student-entry-header">
+                                <div className="student-entry-number">#{sIdx + 1}</div>
+                                <button
+                                  type="button"
+                                  className="student-remove-btn"
+                                  onClick={() => removeStudent(libIdx, sIdx)}
+                                  title="Remove Student"
+                                >
+                                  <span className="material-symbols-rounded icon-sm">delete</span>
+                                </button>
+                              </div>
+
+                              <div className="student-entry-grid">
+                                <section className="student-entry-section">
+                                  <h6 className="student-entry-section-title">Student Info</h6>
+                                  <div className="student-entry-fields">
+                                    <input
+                                      type="text"
+                                      className="form-input student-entry-input"
+                                      value={student.name}
+                                      onChange={(e) => updateStudent(libIdx, sIdx, 'name', e.target.value)}
+                                      placeholder="Full Name *"
+                                    />
+                                    <input
+                                      type="text"
+                                      className="form-input student-entry-input"
+                                      value={student.father_name}
+                                      onChange={(e) => updateStudent(libIdx, sIdx, 'father_name', e.target.value)}
+                                      placeholder="Father's Name *"
+                                    />
+                                    <input
+                                      type="tel"
+                                      className="form-input student-entry-input"
+                                      value={student.phone}
+                                      onChange={(e) => updateStudent(libIdx, sIdx, 'phone', e.target.value)}
+                                      placeholder="Phone (10 digits) *"
+                                    />
+                                    <select
+                                      className="form-select student-entry-input"
+                                      value={student.gender}
+                                      onChange={(e) => updateStudent(libIdx, sIdx, 'gender', e.target.value)}
+                                    >
+                                      <option value="male">Male</option>
+                                      <option value="female">Female</option>
+                                    </select>
+                                  </div>
+                                </section>
+
+                                <section className="student-entry-section">
+                                  <h6 className="student-entry-section-title">Address</h6>
+                                  <textarea
+                                    className="form-textarea student-entry-address"
+                                    value={student.address}
+                                    onChange={(e) => updateStudent(libIdx, sIdx, 'address', e.target.value)}
+                                    placeholder="Full Address * (House, Street, Area, City, Pincode)"
+                                  />
+                                </section>
+
+                                <section className="student-entry-section">
+                                  <h6 className="student-entry-section-title">Shift and Seat</h6>
+                                  <div className="student-entry-fields">
+                                    <select
+                                      className="form-select student-entry-input"
+                                      value={student.shift_id}
+                                      onChange={(e) => updateStudent(libIdx, sIdx, 'shift_id', e.target.value)}
+                                    >
+                                      <option value="">Select Shift</option>
+                                      {lib.shifts.map(sh => <option key={sh.id} value={sh.id}>[Base] {sh.label}</option>)}
+                                      {lib.combinedPricing?.filter(c => c.is_offered).map(c => <option key={c.id} value={c.id}>[Combo] {c.label}</option>)}
+                                    </select>
+                                    <div className="student-seat-readout">
+                                      <strong className="student-seat-code">
+                                        {student.seat_number || 'No seat available'}
+                                      </strong>
+                                      <span className="student-seat-meta">
+                                        {student.shift_id
+                                          ? `${student.seat_available_count || 0} seats left for this shift`
+                                          : 'Select shift to auto-assign seat'}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </section>
+
+                                <section className="student-entry-section">
+                                  <h6 className="student-entry-section-title">Locker</h6>
+                                  <div className="student-entry-fields">
+                                    <label className={`student-locker-toggle ${!student.locker_allowed ? 'disabled' : ''}`}>
+                                      <input
+                                        type="checkbox"
+                                        className="form-checkbox"
+                                        checked={student.has_locker}
+                                        disabled={!student.locker_allowed}
+                                        onChange={(e) => updateStudent(libIdx, sIdx, 'has_locker', e.target.checked)}
+                                      />
+                                      <span>Assign locker</span>
+                                    </label>
+                                    {student.locker_allowed && (
+                                      <span className="student-locker-note">
+                                        {student.locker_available_count || 0} lockers available
+                                      </span>
+                                    )}
+                                    {!student.locker_allowed && (
+                                      <span className="student-locker-note">
+                                        {student.locker_disabled_reason || 'Locker not available for this student'}
+                                      </span>
+                                    )}
+                                    {student.has_locker && (
+                                      <>
+                                        <select
+                                          className="form-select student-entry-input"
+                                          value={student.locker_no || ''}
+                                          onChange={(e) => updateStudent(libIdx, sIdx, 'locker_no', e.target.value)}
+                                        >
+                                          <option value="">
+                                            {(student.locker_options || []).length > 0 ? 'Select Locker' : 'No locker left'}
+                                          </option>
+                                          {(student.locker_options || []).map((lockerNo) => (
+                                            <option key={lockerNo} value={lockerNo}>
+                                              {lockerNo}
+                                            </option>
+                                          ))}
+                                        </select>
+                                        <span className="student-locker-note">
+                                          {student.locker_no
+                                            ? `${student.locker_available_count || 0} lockers left after assignment`
+                                            : `${student.locker_available_count || 0} lockers available`}
+                                        </span>
+                                      </>
+                                    )}
+                                  </div>
+                                </section>
+
+                                <section className="student-entry-section">
+                                  <h6 className="student-entry-section-title">Payment</h6>
+                                  <div className="student-entry-fields">
+                                    <select
+                                      className="form-select student-entry-input"
+                                      value={student.plan_duration}
+                                      onChange={(e) => updateStudent(libIdx, sIdx, 'plan_duration', e.target.value)}
+                                    >
+                                      {FEE_PLAN_MONTHS.map((month) => (
+                                        <option key={month} value={String(month)}>
+                                          {month} {month === 1 ? 'Month' : 'Months'}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <input
+                                      type="date"
+                                      className="form-input student-entry-input"
+                                      value={student.admission_date || ''}
+                                      onChange={(e) => updateStudent(libIdx, sIdx, 'admission_date', e.target.value)}
+                                    />
+                                    <input
+                                      type="date"
+                                      className="form-input student-entry-input student-entry-readonly"
+                                      value={student.end_date || ''}
+                                      readOnly
+                                    />
+                                    <div className="student-amount-field">
+                                      <span className="student-amount-currency">₹</span>
+                                      <input
+                                        type="number"
+                                        className="form-input student-entry-input student-amount-input student-entry-readonly"
+                                        value={student.amount_paid}
+                                        readOnly
+                                      />
+                                    </div>
+                                    <span className="student-amount-hint">
+                                      Shift fee is auto-calculated from selected shift and plan duration.
+                                    </span>
+                                    <select
+                                      className="form-select student-entry-input"
+                                      value={student.payment_status}
+                                      onChange={(e) => updateStudent(libIdx, sIdx, 'payment_status', e.target.value)}
+                                    >
+                                      <option value="paid">Paid</option>
+                                      <option value="pending">Pending</option>
+                                    </select>
+                                  </div>
+                                </section>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-
-                  {lib.imported_students.length === 0 ? (
-                    <div className="text-center p-8 rounded-xl" style={{ border: '1px dashed var(--color-border)', background: 'var(--color-surface-light)' }}>
-                      <span className="material-symbols-rounded icon-lg" style={{ color: 'var(--color-border-hover)' }}>group_off</span>
-                      <p className="mt-2 text-sm text-muted">No students added yet.</p>
-                      <p className="text-xs text-muted">Click the button above to import a student.</p>
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto border border-slate-200 rounded-xl">
-                      <table className="w-full text-left text-sm whitespace-nowrap">
-                        <thead className="bg-slate-50 text-navy font-bold border-b border-slate-200">
-                          <tr>
-                            <th className="p-3">#</th>
-                            <th className="p-3 min-w-[150px]">Student Info</th>
-                            <th className="p-3 min-w-[200px]">Address</th>
-                            <th className="p-3 min-w-[150px]">Shift & Seat</th>
-                            <th className="p-3 min-w-[150px]">Locker</th>
-                            <th className="p-3 min-w-[150px]">Payment</th>
-                            <th className="p-3 text-center">Action</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 bg-white">
-                          {lib.imported_students.map((student, sIdx) => {
-                            // Find shift price
-                            let shiftPrice = 0;
-                            if (student.shift_id) {
-                              const baseOption = lib.shifts.find(s => s.id === student.shift_id);
-                              const comboOption = lib.combinedPricing?.find(c => c.id === student.shift_id);
-                              if (baseOption) shiftPrice = Number(baseOption.monthly_fee) || 0;
-                              if (comboOption) shiftPrice = Number(comboOption.custom_fee) || Number(comboOption.default_fee) || 0;
-                            }
-                            
-                            const autoAmount = shiftPrice * Number(student.plan_duration);
-
-                            return (
-                              <tr key={`student-${libIdx}-${sIdx}`} className="hover:bg-slate-50 align-top">
-                                <td className="p-3 text-slate-400 text-xs font-mono">{sIdx + 1}</td>
-                                
-                                <td className="p-3 space-y-2">
-                                  <input type="text" className="form-input text-xs py-1 px-2 w-full" value={student.name} onChange={(e) => updateStudent(libIdx, sIdx, 'name', e.target.value)} placeholder="Full Name *" />
-                                  <input type="text" className="form-input text-xs py-1 px-2 w-full" value={student.father_name} onChange={(e) => updateStudent(libIdx, sIdx, 'father_name', e.target.value)} placeholder="Father's Name *" />
-                                  <input type="tel" className="form-input text-xs py-1 px-2 w-full" value={student.phone} onChange={(e) => updateStudent(libIdx, sIdx, 'phone', e.target.value)} placeholder="Phone (10 digits) *" />
-                                  <select className="form-select text-xs py-1 px-2 w-full" value={student.gender} onChange={(e) => updateStudent(libIdx, sIdx, 'gender', e.target.value)}>
-                                    <option value="male">Male</option>
-                                    <option value="female">Female</option>
-                                  </select>
-                                </td>
-                                
-                                <td className="p-3">
-                                  <textarea className="form-input text-xs py-2 px-2 w-full h-full min-h-[120px] resize-none" value={student.address} onChange={(e) => updateStudent(libIdx, sIdx, 'address', e.target.value)} placeholder="Full Address * (House, Street, Area, City, Pincode)" />
-                                </td>
-                                
-                                <td className="p-3 space-y-2">
-                                  <select className="form-select text-xs py-1 px-2 w-full" value={student.shift_id} onChange={(e) => updateStudent(libIdx, sIdx, 'shift_id', e.target.value)}>
-                                    <option value="">-- Select Shift --</option>
-                                    {lib.shifts.map(sh => <option key={sh.id} value={sh.id}>[Base] {sh.label}</option>)}
-                                    {lib.combinedPricing?.filter(c => c.is_offered).map(c => <option key={c.id} value={c.id}>[Combo] {c.label}</option>)}
-                                  </select>
-                                  <div className="relative">
-                                    <input type="text" className="form-input text-xs py-1 px-2 pr-12 w-full" value={student.seat_number} onChange={(e) => updateStudent(libIdx, sIdx, 'seat_number', e.target.value)} placeholder="Seat No." />
-                                    <button className="absolute right-1 top-1/2 -translate-y-1/2 text-amber-600 text-[10px] font-bold" type="button" onClick={() => {/* Fetch available seats modal later */}}>CHECK</button>
-                                  </div>
-                                </td>
-                                
-                                <td className="p-3 space-y-2">
-                                  <label className="flex items-center gap-2 cursor-pointer mb-1">
-                                    <input type="checkbox" className="form-checkbox h-3 w-3" checked={student.has_locker} onChange={(e) => updateStudent(libIdx, sIdx, 'has_locker', e.target.checked)} />
-                                    <span className="text-xs font-semibold">Assign Locker?</span>
-                                  </label>
-                                  {student.has_locker && (
-                                    <input type="text" className="form-input text-xs py-1 px-2 w-full" value={student.locker_no} onChange={(e) => updateStudent(libIdx, sIdx, 'locker_no', e.target.value)} placeholder="Locker No." />
-                                  )}
-                                </td>
-                                
-                                <td className="p-3 space-y-2">
-                                  <select className="form-select text-xs py-1 px-2 w-full" value={student.plan_duration} onChange={(e) => {
-                                    const newDuration = e.target.value;
-                                    updateStudent(libIdx, sIdx, 'plan_duration', newDuration);
-                                    updateStudent(libIdx, sIdx, 'amount_paid', shiftPrice * Number(newDuration));
-                                  }}>
-                                    <option value="1">1 Month</option>
-                                    <option value="3">3 Months</option>
-                                    <option value="6">6 Months</option>
-                                    <option value="12">1 Year</option>
-                                  </select>
-                                  <div className="relative mt-2">
-                                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-slate-400">₹</span>
-                                    <input type="number" className="form-input text-xs py-1 pl-5 pr-2 w-full" value={student.amount_paid} onChange={(e) => updateStudent(libIdx, sIdx, 'amount_paid', e.target.value)} placeholder={autoAmount} />
-                                  </div>
-                                  <select className="form-select text-xs py-1 px-2 w-full mt-2" value={student.payment_status} onChange={(e) => updateStudent(libIdx, sIdx, 'payment_status', e.target.value)}>
-                                    <option value="paid">Paid</option>
-                                    <option value="pending">Pending</option>
-                                  </select>
-                                </td>
-                                
-                                <td className="p-3 text-center">
-                                  <button type="button" className="text-danger hover:text-danger-dark p-1 rounded hover:bg-red-50" onClick={() => removeStudent(libIdx, sIdx)} title="Remove Student">
-                                    <span className="material-symbols-rounded icon-sm">delete</span>
-                                  </button>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              ))}
+                  );
+                })}
+              </div>
             </div>
           )}
 
-          {/* ─── Step 7: Account Setup ─── */}
+          {/* ─── Step 7: Students Review ─── */}
           {actualStep === 7 && (
-             <div className="animate-fadeIn">
+            <div className="animate-fadeIn">
               <h2 className="text-3xl font-bold mb-1 text-navy">
-                 Create Admin Account
+                Review Imported Students
               </h2>
-             <p className="text-sm mb-6 text-muted">
-                Set a password to securely manage your libraries at admin.libraryos.in. Your login email will be the Contact Email provided earlier.
+              <p className="text-sm mb-6 text-muted">
+                Confirm students, shifts, subscription period, and payment status before creating account credentials.
               </p>
 
-              <div className="max-w-md bg-white p-6 rounded-xl" style={{ border: '1px solid var(--color-border)', boxShadow: 'var(--shadow-sm)' }}>
-                <div className="form-group mb-4">
-                  <label className="form-label">Login Email</label>
-                  <input type="email" className="form-input bg-surface-light text-muted cursor-not-allowed" value={libraries[0].contact_email} disabled />
-                  <p className="text-xs text-muted mt-1">This email was set in the Contact Step.</p>
-                </div>
+              <div className="flex flex-col gap-6">
+                {libraries.map((lib, libIdx) => {
+                  const students = lib.imported_students || [];
+                  const totalAmount = students.reduce((sum, s) => sum + Number(s.amount_paid || 0), 0);
+                  const pendingAmount = students.reduce(
+                    (sum, s) => sum + (s.payment_status === 'pending' ? Number(s.amount_paid || 0) : 0),
+                    0,
+                  );
+                  const collectedAmount = totalAmount - pendingAmount;
+                  return (
+                    <div key={libIdx} className="p-5 rounded-xl bg-white shadow-sm" style={{ border: '1px solid var(--color-border)' }}>
+                      <h3 className="font-bold text-lg pb-3 mb-4 flex items-center gap-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
+                        <span className="material-symbols-rounded text-amber-500">groups</span>
+                        {lib.name || `Library ${libIdx + 1}`} Students
+                      </h3>
 
-                <div className="form-group mb-4">
-                  <label className="form-label">Password</label>
-                  <input
-                    type="password"
-                    className={`form-input ${errors.adminPassword ? 'error' : ''}`}
-                    value={form.adminPassword}
-                    onChange={(e) => updateField('adminPassword', e.target.value)}
-                    placeholder="Min 6 characters"
-                  />
-                  {errors.adminPassword && <div className="form-error">{errors.adminPassword}</div>}
-                </div>
+                      {students.length === 0 ? (
+                        <div className="p-5 rounded-xl text-center text-sm text-muted" style={{ background: 'var(--color-surface-dark)', border: '1px dashed var(--color-border)' }}>
+                          No imported students for this library.
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-sm whitespace-nowrap">
+                            <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                              <tr>
+                                <th className="p-3 font-semibold">Name</th>
+                                <th className="p-3 font-semibold">Shift</th>
+                                <th className="p-3 font-semibold">Subscription</th>
+                                <th className="p-3 font-semibold">Status</th>
+                                <th className="p-3 font-semibold text-right">Amount</th>
+                                <th className="p-3 font-semibold text-right">Pending</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {students.map((student) => {
+                                const amount = Number(student.amount_paid || 0);
+                                const pending = student.payment_status === 'pending' ? amount : 0;
+                                return (
+                                  <tr key={student.id}>
+                                    <td className="p-3">
+                                      <div className="font-semibold text-navy">{student.name}</div>
+                                      <div className="text-xs text-muted">{student.phone}</div>
+                                    </td>
+                                    <td className="p-3 text-navy">{getShiftLabelForStudent(lib, student.shift_id)}</td>
+                                    <td className="p-3 text-navy">
+                                      <div>{student.admission_date || '-'}</div>
+                                      <div className="text-xs text-muted">to {student.end_date || '-'} ({student.plan_duration}M)</div>
+                                    </td>
+                                    <td className="p-3">
+                                      <span
+                                        className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold"
+                                        style={{
+                                          background: student.payment_status === 'paid' ? 'var(--color-success-light)' : 'var(--color-warning-light)',
+                                          color: student.payment_status === 'paid' ? 'var(--color-success)' : '#92400E',
+                                        }}
+                                      >
+                                        {student.payment_status === 'paid' ? 'Paid' : 'Pending'}
+                                      </span>
+                                    </td>
+                                    <td className="p-3 text-right font-semibold text-navy">₹{amount.toLocaleString('en-IN')}</td>
+                                    <td className="p-3 text-right font-semibold" style={{ color: pending > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>
+                                      ₹{pending.toLocaleString('en-IN')}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
 
-                <div className="form-group mb-2">
-                  <label className="form-label">Confirm Password</label>
-                  <input
-                    type="password"
-                    className={`form-input ${errors.adminPasswordConfirm ? 'error' : ''}`}
-                    value={form.adminPasswordConfirm}
-                    onChange={(e) => updateField('adminPasswordConfirm', e.target.value)}
-                    placeholder="Re-enter password"
-                  />
-                  {errors.adminPasswordConfirm && <div className="form-error">{errors.adminPasswordConfirm}</div>}
-                </div>
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+                        <div className="p-3 rounded-lg" style={{ border: '1px solid var(--color-border)', background: 'var(--color-surface-dark)' }}>
+                          <div className="text-xs text-muted">Total Students</div>
+                          <div className="text-xl font-bold text-navy">{students.length}</div>
+                        </div>
+                        <div className="p-3 rounded-lg" style={{ border: '1px solid var(--color-border)', background: 'var(--color-surface-dark)' }}>
+                          <div className="text-xs text-muted">Collected</div>
+                          <div className="text-xl font-bold" style={{ color: 'var(--color-success)' }}>₹{collectedAmount.toLocaleString('en-IN')}</div>
+                        </div>
+                        <div className="p-3 rounded-lg" style={{ border: '1px solid var(--color-border)', background: 'var(--color-surface-dark)' }}>
+                          <div className="text-xs text-muted">Pending</div>
+                          <div className="text-xl font-bold" style={{ color: 'var(--color-danger)' }}>₹{pendingAmount.toLocaleString('en-IN')}</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-             </div>
+            </div>
           )}
 
-          {/* ─── Step 8: Review & Payment ─── */}
+          {/* ─── Step 8: Account Setup ─── */}
           {actualStep === 8 && (
+            <div className="animate-fadeIn">
+              <h2 className="text-3xl font-bold mb-1 text-navy">
+                Account Credentials Setup
+              </h2>
+              <p className="text-sm mb-6 text-muted">
+                Owner email is prefilled for admin. Set passwords and optionally add a staff account for each library.
+              </p>
+
+              <div className="flex flex-col gap-6">
+                {libraries.map((lib, libIdx) => {
+                  const ownerEmail = libraries[0]?.contact_email || '';
+                  const adminEmailValue = lib.admin_email || ownerEmail;
+                  return (
+                    <div key={libIdx} className="p-5 rounded-xl bg-white shadow-sm" style={{ border: '1px solid var(--color-border)' }}>
+                      <h3 className="font-bold text-lg pb-3 mb-4 flex items-center gap-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
+                        <span className="material-symbols-rounded text-amber-500">admin_panel_settings</span>
+                        {lib.name || `Library ${libIdx + 1}`}
+                      </h3>
+
+                      <div className="p-4 rounded-xl mb-4" style={{ background: 'var(--color-surface-dark)', border: '1px solid var(--color-border)' }}>
+                        <h4 className="font-semibold text-navy mb-3">Library Admin Account</h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="form-group mb-0">
+                            <label className="form-label">Admin Email</label>
+                            <input
+                              type="email"
+                              className={`form-input ${errors[`${libIdx}_admin_email`] ? 'error' : ''}`}
+                              value={adminEmailValue}
+                              onChange={(e) => updateLibField(libIdx, 'admin_email', e.target.value)}
+                              placeholder="admin@library.com"
+                            />
+                            {errors[`${libIdx}_admin_email`] && <div className="form-error">{errors[`${libIdx}_admin_email`]}</div>}
+                            <div className="text-xs text-muted mt-1">Prefilled from owner contact email.</div>
+                          </div>
+                          <div className="form-group mb-0">
+                            <label className="form-label">Admin Password</label>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                className={`form-input ${errors[`${libIdx}_admin_password`] ? 'error' : ''}`}
+                                value={lib.admin_password}
+                                onChange={(e) => updateLibField(libIdx, 'admin_password', e.target.value)}
+                                placeholder="Minimum 6 characters"
+                              />
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => updateLibField(libIdx, 'admin_password', generateTempPassword())}
+                              >
+                                Generate
+                              </button>
+                            </div>
+                            {errors[`${libIdx}_admin_password`] && <div className="form-error">{errors[`${libIdx}_admin_password`]}</div>}
+                          </div>
+                        </div>
+                        <p className="text-xs text-muted mt-3">
+                          Admin can fully manage this library with complete CRUD access.
+                        </p>
+                      </div>
+
+                      <div className="p-4 rounded-xl" style={{ background: 'var(--color-surface-dark)', border: '1px solid var(--color-border)' }}>
+                        <label className="checkbox-label mb-3">
+                          <input
+                            type="checkbox"
+                            className="form-checkbox"
+                            checked={Boolean(lib.staff_enabled)}
+                            onChange={(e) => {
+                              const enabled = e.target.checked;
+                              setLibraries((prev) =>
+                                prev.map((item, idx) =>
+                                  idx === libIdx
+                                    ? {
+                                        ...item,
+                                        staff_enabled: enabled,
+                                        staff_email: enabled ? item.staff_email : '',
+                                        staff_password: enabled ? item.staff_password : '',
+                                      }
+                                    : item,
+                                ),
+                              );
+                            }}
+                          />
+                          <span>Add Staff Account</span>
+                        </label>
+
+                        {lib.staff_enabled && (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="form-group mb-0">
+                              <label className="form-label">Staff Email</label>
+                              <input
+                                type="email"
+                                className={`form-input ${errors[`${libIdx}_staff_email`] ? 'error' : ''}`}
+                                value={lib.staff_email}
+                                onChange={(e) => updateLibField(libIdx, 'staff_email', e.target.value)}
+                                placeholder="staff@library.com"
+                              />
+                              {errors[`${libIdx}_staff_email`] && <div className="form-error">{errors[`${libIdx}_staff_email`]}</div>}
+                            </div>
+                            <div className="form-group mb-0">
+                              <label className="form-label">Staff Password</label>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="text"
+                                  className={`form-input ${errors[`${libIdx}_staff_password`] ? 'error' : ''}`}
+                                  value={lib.staff_password}
+                                  onChange={(e) => updateLibField(libIdx, 'staff_password', e.target.value)}
+                                  placeholder="Minimum 6 characters"
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary btn-sm"
+                                  onClick={() => updateLibField(libIdx, 'staff_password', generateTempPassword())}
+                                >
+                                  Generate
+                                </button>
+                              </div>
+                              {errors[`${libIdx}_staff_password`] && <div className="form-error">{errors[`${libIdx}_staff_password`]}</div>}
+                            </div>
+                          </div>
+                        )}
+
+                        <p className="text-xs text-muted mt-3">
+                          Staff can view data, admit students, and collect payments, but cannot delete data or change core library setup.
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ─── Step 9: Plan Selection ─── */}
+          {actualStep === 9 && (
+            <div className="animate-fadeIn">
+              <h2 className="text-3xl font-bold mb-1 text-navy">
+                Select Subscription Plan
+              </h2>
+              <p className="text-sm mb-6 text-muted">
+                Choose a plan for each of your libraries to activate them on LibraryOS.
+              </p>
+
+              <div className="flex flex-col gap-6">
+                {libraries.map((lib, libIdx) => (
+                  <div key={libIdx} className="p-5 rounded-xl bg-white shadow-sm" style={{ border: '1px solid var(--color-border)' }}>
+                    <h3 className="font-bold text-lg pb-3 mb-4 flex items-center gap-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
+                      <span className="material-symbols-rounded text-amber-500">store</span>
+                      {lib.name || `Library ${libIdx + 1}`}
+                    </h3>
+
+                    {isFetchingPlans ? (
+                      <div className="p-8 text-center text-muted"><span className="loading-spinner"></span> Loading plans...</div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {pricingPlans.map((plan, planIdx) => {
+                          const planIdentity = getPlanIdentity(plan);
+                          const selectedPlanIdentity = getPlanIdentity(lib.selectedPlan);
+                          const isSelected = selectedPlanIdentity !== '' && selectedPlanIdentity === planIdentity;
+                          const planKey =
+                            planIdentity || `plan_${planIdx}_${plan.name || plan.label || plan.duration_days || 'x'}`;
+                          return (
+                            <label
+                              key={planKey}
+                              className={`relative p-5 rounded-xl cursor-pointer transition-all border-2 ${isSelected ? 'border-amber-500 bg-amber-50/30' : 'border-slate-200 hover:border-amber-300'}`}
+                            >
+                              <input
+                                type="radio"
+                                name={`plan_${libIdx}`}
+                                value={planKey}
+                                className="absolute right-4 top-4 h-5 w-5 text-amber-500 focus:ring-amber-500"
+                                checked={isSelected}
+                                onChange={() => updateLibField(libIdx, 'selectedPlan', plan)}
+                              />
+                              <div className="mb-3">
+                                {plan.name === "3_month" && <span className="inline-block px-2 py-1 bg-blue-100 text-blue-700 text-xs font-bold rounded mb-2 uppercase">Most Popular</span>}
+                                <h4 className="text-xl font-bold text-navy mb-1">{plan.label}</h4>
+                                <div className="flex items-baseline gap-1">
+                                  <span className="text-2xl font-black text-navy">₹{plan.base_price}</span>
+                                  <span className="text-sm text-slate-500">/{plan.duration_days} days</span>
+                                </div>
+                              </div>
+                              <ul className="space-y-2 text-sm text-slate-600">
+                                <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-green-500">check_circle</span> Unlimited Shifts & Combos</li>
+                                <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-green-500">check_circle</span> Locker Management</li>
+                                <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-green-500">check_circle</span> Income & Expense Tracking</li>
+                              </ul>
+                            </label>
+                          );
+                        })}
+
+                        <label className={`relative p-5 rounded-xl cursor-not-allowed border-2 border-slate-200 bg-slate-50 opacity-70`}>
+                          <div className="absolute right-4 top-4">
+                            <span className="material-symbols-rounded text-slate-400">lock</span>
+                          </div>
+                          <div className="mb-3">
+                            <span className="inline-block px-2 py-1 bg-slate-200 text-slate-600 text-xs font-bold rounded mb-2">COMING SOON</span>
+                            <h4 className="text-xl font-bold text-slate-500 mb-1">Premium + AI CCTV</h4>
+                            <div className="flex items-baseline gap-1">
+                              <span className="text-2xl font-black text-slate-400">TBD</span>
+                            </div>
+                          </div>
+                          <ul className="space-y-2 text-sm text-slate-500">
+                            <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-slate-400">check_circle</span> All Standard Features</li>
+                            <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-slate-400">check_circle</span> Admin App Access</li>
+                            <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-slate-400">check_circle</span> Student App with QR Check-in</li>
+                            <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-slate-400">check_circle</span> AI CCTV Integration</li>
+                          </ul>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ─── Step 10: Review & Payment ─── */}
+          {actualStep === 10 && (
             <div className="animate-fadeIn">
               <h2 className="text-3xl font-bold mb-1 text-navy">
                 Choose Subscription & Checkout
@@ -1448,49 +3031,104 @@ export default function RegisterLibrary() {
                 <h3 className="font-bold text-navy mb-4">You are registering {libraries.length} {libraries.length === 1 ? 'Library' : 'Libraries'}:</h3>
                 <ul className="list-disc pl-5 text-sm text-navy font-medium">
                   {libraries.map((lib, i) => (
-                    <li key={i}>{lib.name || `Library ${i+1}`} ({lib.total_seats} seats)</li>
+                    <li key={i}>
+                      {lib.name || `Library ${i + 1}`} ({(Number(lib.male_seats) || 0) + (Number(lib.female_seats) || 0)} seats)
+                    </li>
                   ))}
                 </ul>
               </div>
 
-              <h3 className="font-bold text-navy mb-4 mt-8">Select Software Plan</h3>
-              {isFetchingPlans ? (
-                 <div className="p-8 text-center text-muted"><span className="loading-spinner"></span> Loading plans...</div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
-                  {pricingPlans.map((plan) => {
-                    const isSelected = selectedPlan?.id === plan.id;
-                    const isPopular = plan.name === "3_month";
-                    return (
-                      <div
-                        key={plan.id}
-                        onClick={() => setSelectedPlan(plan)}
-                        className={`p-5 rounded-xl transition-all cursor-pointer relative ${isSelected ? 'ring-2 ring-amber bg-amber-lightest' : 'bg-white hover:bg-surface-light'}`}
-                        style={{ border: `1px solid ${isSelected ? 'var(--color-amber)' : 'var(--color-border)'}` }}
-                      >
-                         {isPopular && (
-                            <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-main text-white text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
-                              Most Popular
-                            </span>
-                          )}
-                        <h4 className="font-bold text-navy mb-1">{plan.label}</h4>
-                        <p className="text-xs text-muted mb-3">{plan.duration_days} Days / Library</p>
-                        <div className="text-2xl font-black text-main flex items-baseline gap-1">
-                          ₹{plan.base_price} <span className="text-xs font-normal text-muted">/ lib</span>
-                        </div>
-                      </div>
-                    );
-                  })}
+              <div className="bg-white rounded-xl shadow-sm mb-8 overflow-hidden" style={{ border: '1px solid var(--color-border)' }}>
+                <div className="p-5 border-b border-slate-100 bg-slate-50">
+                  <h3 className="font-bold text-navy text-lg">Order Summary</h3>
                 </div>
-              )}
+                
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-sm whitespace-nowrap">
+                    <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                      <tr>
+                        <th className="p-4 font-semibold">Library Name</th>
+                        <th className="p-4 font-semibold">Plan Chosen</th>
+                        <th className="p-4 font-semibold">Duration</th>
+                        <th className="p-4 font-semibold text-right">Price</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {libraries.map((lib, i) => {
+                        const plan = lib.selectedPlan;
+                        return (
+                          <tr key={i}>
+                            <td className="p-4 font-medium text-navy">
+                              {lib.name || `Library ${i+1}`} 
+                              <span className="text-xs text-slate-400 block font-normal mt-1">{lib.city}{lib.state ? `, ${lib.state}` : ''}</span>
+                            </td>
+                            <td className="p-4 text-slate-600">{plan ? plan.label : <span className="text-red-500 font-bold">Missing</span>}</td>
+                            <td className="p-4 text-slate-600">{plan ? `${plan.duration_days} days` : '-'}</td>
+                            <td className="p-4 text-navy font-bold text-right">{plan ? `₹${plan.base_price}` : '₹0'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot className="bg-slate-50/50">
+                      <tr>
+                        <td colSpan="3" className="p-4 text-right font-medium text-slate-500">Subtotal:</td>
+                        <td className="p-4 text-right font-bold text-navy">
+                          ₹{libraries.reduce((sum, lib) => sum + (lib.selectedPlan?.base_price || 0), 0)}
+                        </td>
+                      </tr>
+                      {promoDiscount > 0 && (
+                        <tr className="text-green-600 bg-green-50/30">
+                          <td colSpan="3" className="p-3 pr-4 text-right font-medium">Promo Applied ({promoCode}):</td>
+                          <td className="p-3 pr-4 text-right font-bold">-₹{promoDiscount}</td>
+                        </tr>
+                      )}
+                      <tr className="border-t border-slate-200 bg-slate-50">
+                        <td colSpan="3" className="p-5 text-right font-bold text-navy text-lg">Total Payable:</td>
+                        <td className="p-5 text-right font-black text-main text-2xl">
+                          ₹{Math.max(0, libraries.reduce((sum, lib) => sum + (lib.selectedPlan?.base_price || 0), 0) - promoDiscount)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
 
-              {selectedPlan && (
-                <div className="mb-8 p-6 rounded-xl text-center" style={{ background: '#F8FAFC', border: '2px dashed var(--color-border)' }}>
-                   <p className="text-muted mb-2 font-medium">Checkout Total</p>
-                   <div className="text-4xl font-black text-navy mb-2">₹{selectedPlan.base_price * libraries.length}</div>
-                   <p className="text-sm text-muted">({libraries.length} {libraries.length === 1 ? 'Library' : 'Libraries'} × ₹{selectedPlan.base_price}) for {selectedPlan.duration_days} Days Access</p>
+              <div className="mb-8 p-6 rounded-xl bg-white border border-slate-200 w-full max-w-md shadow-sm">
+                <label className="form-label mb-3 block font-bold text-navy">Have a Promo Code?</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    className="form-input flex-1 uppercase font-mono tracking-wider"
+                    placeholder="ENTER CODE"
+                    value={promoInput}
+                    onChange={(e) => setPromoInput(e.target.value.toUpperCase())}
+                    disabled={isVerifyingPromo || promoDiscount > 0}
+                  />
+                  {promoDiscount === 0 ? (
+                    <button 
+                      className="btn btn-secondary whitespace-nowrap px-6"
+                      onClick={applyPromo}
+                      disabled={isVerifyingPromo || !promoInput.trim()}
+                    >
+                      {isVerifyingPromo ? <span className="loading-spinner"></span> : 'Apply'}
+                    </button>
+                  ) : (
+                    <button 
+                      className="btn btn-secondary whitespace-nowrap px-6 border-red-200 text-red-600 hover:bg-red-50 hover:border-red-300"
+                      onClick={removePromo}
+                    >
+                      Remove
+                    </button>
+                  )}
                 </div>
-              )}
+                {promoError && <p className="text-red-500 text-xs mt-2 font-medium">{promoError}</p>}
+                {promoDiscount > 0 && (
+                  <p className="text-green-600 font-medium text-xs mt-2 flex items-center gap-1">
+                    <span className="material-symbols-rounded icon-sm" style={{ fontSize: '16px' }}>check_circle</span> 
+                    Discount applied to your order!
+                  </p>
+                )}
+              </div>
 
               <label className="checkbox-label mb-6 p-4 rounded-xl items-start" style={{ background: 'var(--color-amber-lightest)', border: '1px solid var(--color-amber-light)' }}>
                 <input
@@ -1503,6 +3141,16 @@ export default function RegisterLibrary() {
                   I confirm all details above are correct and I want to submit my registration.
                 </span>
               </label>
+
+              <div className="p-4 rounded-xl mb-6 text-sm" style={{ background: 'var(--color-surface-dark)', border: '1px solid var(--color-border)' }}>
+                After successful payment, you will be redirected to the library management portal:
+                {' '}
+                <a href="/manage-library" style={{ color: 'var(--color-amber-dark)', fontWeight: 700 }}>
+                  /manage-library
+                </a>
+                {' '}
+                (portal screens will be expanded in the next phase).
+              </div>
 
               {submitError && (
                 <div className="p-4 rounded-xl mb-6 text-sm flex items-start gap-2" style={{ background: 'var(--color-danger-light)', color: 'var(--color-danger)' }}>
@@ -1531,24 +3179,24 @@ export default function RegisterLibrary() {
                 </button>
               )}
             </div>
-            {actualStep < 8 ? (
+            {actualStep < 10 ? (
               <button className="btn btn-primary" onClick={nextStep}>
                 Continue <span className="material-symbols-rounded icon-sm">arrow_forward</span>
               </button>
             ) : (
               <button
                 className="btn btn-primary"
-                onClick={handleSubmit}
+                onClick={handlePay}
                 disabled={isSubmitting}
                 style={{ opacity: isSubmitting ? 0.7 : 1 }}
               >
                 {isSubmitting ? (
                   <>
-                    <span className="loading-spinner" /> Submitting...
+                    <span className="loading-spinner" /> Processing...
                   </>
                 ) : (
                   <>
-                    Submit Registration <span className="material-symbols-rounded icon-sm">check_circle</span>
+                    Proceed to Payment <span className="material-symbols-rounded icon-sm">lock</span>
                   </>
                 )}
               </button>

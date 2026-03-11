@@ -7,12 +7,16 @@ import {
   generateCredentials,
   suspendLibrary,
   resetCredentials,
+  getLibraryStats,
+  getStudentsAdmin,
+  deleteLibrary,
 } from "../lib/api.js";
 import AdminSiteContent from "../components/AdminSiteContent.jsx";
 import AdminSupportTab from "../components/AdminSupportTab.jsx";
 
 const MAIN_TABS = [
   { id: "libraries", label: "Libraries", icon: "apartment" },
+  { id: "students", label: "Students", icon: "groups" },
   { id: "content", label: "Site Content", icon: "edit_note" },
   { id: "support", label: "Support", icon: "support_agent" },
 ];
@@ -45,6 +49,8 @@ export default function AdminDashboard() {
   const token = sessionStorage.getItem("lms_admin_token");
 
   const [libraries, setLibraries] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [students, setStudents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeMainTab, setActiveMainTab] = useState("libraries");
   const [quickFilter, setQuickFilter] = useState("all");
@@ -56,8 +62,14 @@ export default function AdminDashboard() {
   const fetchLibraries = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await getLibraries(token, "all");
-      setLibraries(data.libraries || []);
+      const [libData, statsData, studentsData] = await Promise.all([
+        getLibraries(token, "all"),
+        getLibraryStats(token).catch(() => null),
+        getStudentsAdmin(token).catch(() => ({ students: [] })),
+      ]);
+      setLibraries(libData.libraries || []);
+      if (statsData) setStats(statsData);
+      if (studentsData && studentsData.students) setStudents(studentsData.students);
     } catch (err) {
       toast.error(err.message || "Failed to load libraries");
     } finally {
@@ -131,6 +143,27 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleDelete = async (lib) => {
+    if (!window.confirm(`⚠️ PERMANENTLY DELETE "${lib.name}"?\n\nThis will remove ALL data including students, seats, lockers, shifts, and memberships. This action CANNOT be undone.`)) {
+      return;
+    }
+    if (!window.confirm(`Are you absolutely sure? Type the library name to confirm: This will delete "${lib.name}" forever.`)) {
+      return;
+    }
+
+    setActionLoading(lib.id);
+    try {
+      await deleteLibrary(token, lib.id);
+      await fetchLibraries();
+      setDrawerLib(null);
+      toast.success(`"${lib.name}" has been permanently deleted`);
+    } catch (err) {
+      toast.error(err.message || "Failed to delete library");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const copyCredentials = () => {
     if (!credModal) return;
 
@@ -159,6 +192,8 @@ export default function AdminDashboard() {
     return matchesFilter && matchesSearch;
   });
 
+  const getStudentsCount = (libId) => students.filter(s => s.library_id === libId).length;
+
   const totalSeats = libraries.reduce(
     (sum, lib) => sum + Number(lib.total_seats || 0),
     0,
@@ -181,27 +216,27 @@ export default function AdminDashboard() {
   const overviewStats = [
     {
       label: "Registered Libraries",
-      value: libraries.length,
+      value: stats?.totalLibraries ?? libraries.length,
       meta: `${coveredCities} cities`,
       icon: "apartment",
     },
     {
-      label: "Pending Approvals",
-      value: pendingLibraries.length,
-      meta: "Needs credentials",
-      icon: "pending_actions",
+      label: "Active Libraries",
+      value: stats?.activeLibraries ?? activeLibraries.length,
+      meta: "System online",
+      icon: "check_circle",
     },
     {
-      label: "Total Seats",
-      value: totalSeats.toLocaleString("en-IN"),
-      meta: `${totalLockers.toLocaleString("en-IN")} lockers`,
-      icon: "chair",
+      label: "Total Students",
+      value: (stats?.totalStudents ?? 0).toLocaleString("en-IN"),
+      meta: "Platform users",
+      icon: "groups",
     },
     {
-      label: "Configured Shifts",
-      value: totalShifts.toLocaleString("en-IN"),
-      meta: `${activeLibraries.length} active libraries`,
-      icon: "schedule",
+      label: "Revenue",
+      value: formatCurrency(stats?.revenue ?? 0),
+      meta: "Platform payments",
+      icon: "payments",
     },
   ];
 
@@ -255,6 +290,16 @@ export default function AdminDashboard() {
           </button>
         </>
       )}
+
+      <button
+        className="btn btn-danger-outline btn-sm"
+        disabled={actionLoading === lib.id}
+        onClick={() => handleDelete(lib)}
+        title="Delete library permanently"
+      >
+        <span className="material-symbols-rounded icon-sm">delete_forever</span>
+        Delete
+      </button>
     </div>
   );
 
@@ -477,6 +522,7 @@ export default function AdminDashboard() {
                           <th>Library</th>
                           <th>Location</th>
                           <th>Capacity</th>
+                          <th>Students</th>
                           <th>Status</th>
                           <th>Login ID</th>
                           <th>Created</th>
@@ -501,6 +547,9 @@ export default function AdminDashboard() {
                               <span className="text-muted">
                                 {lib.total_lockers || 0} lockers
                               </span>
+                            </td>
+                            <td>
+                              <strong>{getStudentsCount(lib.id)}</strong>
                             </td>
                             <td>
                               <span className={`badge ${getStatusBadge(lib.status)}`}>
@@ -572,6 +621,69 @@ export default function AdminDashboard() {
           <section className="admin-page-section">
             <div className="admin-embedded-panel">
               <AdminSiteContent />
+            </div>
+          </section>
+        )}
+
+        {activeMainTab === "students" && (
+          <section className="admin-page-section">
+            <div className="card p-0 overflow-hidden">
+              <div className="table-container" style={{ border: "none" }}>
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Library</th>
+                      <th>Phone</th>
+                      <th>Gender</th>
+                      <th>Seat</th>
+                      <th>Shift</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {students.length === 0 ? (
+                      <tr>
+                        <td colSpan="7" style={{ textAlign: "center", padding: "2rem" }}>
+                          No students found.
+                        </td>
+                      </tr>
+                    ) : (
+                      students.map((student) => {
+                        const membership = student.memberships?.[0] || {};
+                        return (
+                          <tr key={student.id}>
+                            <td>
+                              <strong>{student.full_name}</strong>
+                              <br />
+                              <span className="text-muted">{student.father_name}</span>
+                            </td>
+                            <td>{student.libraries?.name || "—"}</td>
+                            <td>{student.phone}</td>
+                            <td style={{ textTransform: "capitalize" }}>{student.gender}</td>
+                            <td>
+                              {membership.seat_number ? (
+                                <span className="badge badge-navy">{membership.seat_number}</span>
+                              ) : "—"}
+                              {membership.locker_number && (
+                                <><br/><span className="text-muted" style={{ fontSize: "0.8rem" }}>Locker: {membership.locker_number}</span></>
+                              )}
+                            </td>
+                            <td>
+                              {membership.shift_id ? "Assigned" : "—"}
+                            </td>
+                            <td>
+                              <span className={`badge ${student.status === "active" ? "badge-active" : "badge-suspended"}`}>
+                                {student.status}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </section>
         )}
@@ -756,6 +868,14 @@ export default function AdminDashboard() {
                   </button>
                 </>
               )}
+
+              <button
+                className="btn btn-danger-outline"
+                onClick={() => handleDelete(drawerLib)}
+              >
+                <span className="material-symbols-rounded icon-sm">delete_forever</span>
+                Delete permanently
+              </button>
             </div>
           </aside>
         </>

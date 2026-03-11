@@ -157,18 +157,7 @@ export async function loginAdmin(username, password) {
   return res.json();
 }
 
-export async function registerLibrary(data) {
-  const res = await fetch(edgeFunctionUrl("register-library"), {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || "Registration failed");
-  }
-  return res.json();
-}
+
 
 export async function getLibraries(token, status = "all") {
   const url = `${edgeFunctionUrl("get-libraries")}?status=${status}`;
@@ -222,6 +211,19 @@ export async function resetCredentials(token, libraryId) {
   return res.json();
 }
 
+export async function deleteLibrary(token, libraryId) {
+  const res = await fetch(edgeFunctionUrl("delete-library"), {
+    method: "POST",
+    headers: adminHeaders(token),
+    body: JSON.stringify({ library_id: libraryId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Failed to delete library");
+  }
+  return res.json();
+}
+
 // --- NEW EDGE FUNCTIONS ---
 
 export async function getPublicContent(type) {
@@ -251,7 +253,8 @@ export async function getPublicContent(type) {
   }
 }
 
-export async function getPricing() {
+export async function getPricing(options = {}) {
+  const { allowFallback = true } = options;
   const url = edgeFunctionUrl("get-pricing");
   try {
     const controller = new AbortController();
@@ -268,13 +271,20 @@ export async function getPricing() {
     clearTimeout(timeoutId);
 
     if (!res.ok) {
-      // Silently return fallback pricing
-      return { data: fallbackContent.pricing || [] };
+      const err = await res.json().catch(() => ({}));
+      if (allowFallback) {
+        // Silently return fallback pricing
+        return { data: fallbackContent.pricing || [] };
+      }
+      throw new Error(err.error || "Failed to load live pricing plans");
     }
     return await res.json();
   } catch (error) {
-    // Silently return fallback pricing for CORS, network, or timeout errors
-    return { data: fallbackContent.pricing || [] };
+    if (allowFallback) {
+      // Silently return fallback pricing for CORS, network, or timeout errors
+      return { data: fallbackContent.pricing || [] };
+    }
+    throw error instanceof Error ? error : new Error("Failed to load live pricing plans");
   }
 }
 
@@ -420,5 +430,83 @@ export async function deleteContentItem(token, table, id) {
     body: JSON.stringify({ table, id, action: "delete" }),
   });
   if (!res.ok) throw new Error("Failed to delete item");
+  return res.json();
+}
+
+// --- NEW LIBRARYOS V2 FUNCTIONS ---
+
+export async function getAvailableSeats(libraryId, shiftIds, gender, startDate, endDate) {
+  const res = await fetch(edgeFunctionUrl("check-seats"), {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ library_id: libraryId, shift_ids: shiftIds, gender, start_date: startDate, end_date: endDate }),
+  });
+  if (!res.ok) throw new Error("Failed to check seat availability");
+  return res.json();
+}
+
+export async function validatePromo(code) {
+  const res = await fetch(edgeFunctionUrl("validate-promo"), {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) throw new Error("Invalid or expired promo code");
+  return res.json();
+}
+
+export async function registerLibraryBatch(data) {
+  const res = await fetch(edgeFunctionUrl("register-library"), {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Registration failed");
+  }
+  return res.json();
+}
+
+export async function createPaymentOrder(libraryIds, planSelections, promoCodeId) {
+  const res = await fetch(edgeFunctionUrl("create-payment-order"), {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ library_ids: libraryIds, plan_selections: planSelections, promo_code_id: promoCodeId }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || "Failed to create payment order");
+  }
+  return res.json();
+}
+
+export async function verifyPayment(payload) {
+  const res = await fetch(edgeFunctionUrl("verify-payment"), {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error("Payment verification failed");
+  return res.json();
+}
+
+export async function getLibraryStats(token) {
+  const url = `${edgeFunctionUrl("get-library-stats")}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: adminHeaders(token),
+  });
+  if (!res.ok) throw new Error("Failed to fetch library stats");
+  return res.json();
+}
+
+export async function getStudentsAdmin(token) {
+  const url = `${edgeFunctionUrl("get-students-admin")}`;
+  const res = await fetch(url, {
+    method: "GET",
+    headers: adminHeaders(token),
+  });
+  if (!res.ok) throw new Error("Failed to fetch students");
   return res.json();
 }
