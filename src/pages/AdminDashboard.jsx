@@ -147,7 +147,11 @@ export default function AdminDashboard() {
     if (!window.confirm(`⚠️ PERMANENTLY DELETE "${lib.name}"?\n\nThis will remove ALL data including students, seats, lockers, shifts, and memberships. This action CANNOT be undone.`)) {
       return;
     }
-    if (!window.confirm(`Are you absolutely sure? Type the library name to confirm: This will delete "${lib.name}" forever.`)) {
+    const enteredName = window.prompt(`Are you absolutely sure? Type the library name to confirm: This will delete "${lib.name}" forever.`);
+    if (enteredName !== lib.name) {
+      if (enteredName !== null) {
+        toast.error("Library name did not match. Deletion cancelled.");
+      }
       return;
     }
 
