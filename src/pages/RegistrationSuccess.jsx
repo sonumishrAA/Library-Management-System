@@ -31,9 +31,14 @@ export default function RegistrationSuccess() {
   const { credentials } = state;
 
   const handleCopyAll = () => {
-    const textToCopy = credentials.map(cred => 
-      `Library: ${cred.name}\nLogin ID: ${cred.login_id}\nPassword: ${cred.plain_password}\nLogin URL: https://admin.libraryos.in`
-    ).join('\n\n');
+    const textToCopy = credentials.map(cred => {
+      let text = `Library: ${cred.name}\nAdmin ID: ${cred.login_id}\nAdmin Password: ${cred.plain_password}`;
+      if (cred.staff_email) {
+        text += `\nStaff ID: ${cred.staff_email}\nStaff Password: ${cred.plain_staff_password}`;
+      }
+      text += `\nLogin URL: https://admin.libraryos.in`;
+      return text;
+    }).join('\n\n');
     
     navigator.clipboard.writeText(textToCopy);
     setCopied(true);
@@ -83,7 +88,7 @@ export default function RegistrationSuccess() {
                 <div className="p-6">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
-                      <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-2">Login ID / Username</p>
+                      <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-2">Admin Login ID</p>
                       <div className="font-mono text-lg text-navy bg-slate-50 p-3 rounded-lg border border-slate-100 flex justify-between items-center group">
                         {cred.login_id}
                         <button 
@@ -96,7 +101,7 @@ export default function RegistrationSuccess() {
                       </div>
                     </div>
                     <div>
-                      <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-2">Password</p>
+                      <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-2">Admin Password</p>
                       <div className="font-mono text-lg text-navy bg-slate-50 p-3 rounded-lg border border-slate-100 flex justify-between items-center group">
                         {cred.plain_password}
                         <button 
@@ -108,6 +113,43 @@ export default function RegistrationSuccess() {
                         </button>
                       </div>
                     </div>
+
+                    {cred.staff_email && (
+                      <>
+                        <div className="md:col-span-2 mt-2 pt-4 border-t border-slate-100">
+                          <h4 className="font-bold text-navy text-sm flex items-center gap-2">
+                            <span className="material-symbols-rounded icon-sm text-slate-400">group</span>
+                            Staff Account Details
+                          </h4>
+                        </div>
+                        <div>
+                          <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-2">Staff Login ID</p>
+                          <div className="font-mono text-lg text-navy bg-slate-50 p-3 rounded-lg border border-slate-100 flex justify-between items-center group">
+                            {cred.staff_email}
+                            <button 
+                              onClick={() => { navigator.clipboard.writeText(cred.staff_email); }}
+                              className="sm:opacity-0 group-hover:opacity-100 text-slate-400 hover:text-main transition-opacity"
+                              title="Copy ID"
+                            >
+                              <span className="material-symbols-rounded icon-sm">content_copy</span>
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-xs text-slate-500 font-bold uppercase tracking-wider mb-2">Staff Password</p>
+                          <div className="font-mono text-lg text-navy bg-slate-50 p-3 rounded-lg border border-slate-100 flex justify-between items-center group">
+                            {cred.plain_staff_password}
+                            <button 
+                              onClick={() => { navigator.clipboard.writeText(cred.plain_staff_password); }}
+                              className="sm:opacity-0 group-hover:opacity-100 text-slate-400 hover:text-main transition-opacity"
+                              title="Copy Password"
+                            >
+                              <span className="material-symbols-rounded icon-sm">content_copy</span>
+                            </button>
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                   <p className="text-xs text-slate-400 mt-4 text-center">
                     Login at: <a href="https://admin.libraryos.in" target="_blank" rel="noopener noreferrer" className="text-main hover:underline font-medium">admin.libraryos.in</a>
