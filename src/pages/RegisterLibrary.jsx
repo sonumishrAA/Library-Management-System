@@ -1600,28 +1600,67 @@ export default function RegisterLibrary() {
         promoDiscount > 0 ? promoCode : null
       );
 
-      // 3. Razorpay Checkout (Simulated for now if RAZORPAY_KEY is missing, but structure is ready)
-      // Since we don't have the Razorpay SDK actually opening a popup right now without valid keys,
-      // we'll mock the checkout success for demonstration, then call verifyPayment.
-      const mockPaymentId = `pay_mock_${Date.now()}`;
-      const mockSignature = "mock_signature_for_testing";
+      // 3. Razorpay Checkout
+      const options = {
+        key: import.meta.env.VITE_RAZORPAY_KEY_ID,
+        amount: orderRes.amount,
+        currency: orderRes.currency,
+        name: "LibraryOS",
+        description: "Library Registration Payment",
+        order_id: orderRes.order_id,
+        handler: async function (response) {
+          try {
+            // 4. Verify Payment upon successful razorpay checkout
+            const verifyPayload = {
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              library_ids: libraryIds,
+              libraries_payload: payload.libraries,
+            };
 
-      // 4. Verify Payment
-      const verifyPayload = {
-        razorpay_order_id: orderRes.order_id,
-        razorpay_payment_id: mockPaymentId,
-        razorpay_signature: mockSignature,
-        library_ids: libraryIds,
-        libraries_payload: payload.libraries, // Needed to insert imported_students
+            const verifyRes = await verifyPayment(verifyPayload);
+
+            toast.success(`${libraries.length} ${libraries.length === 1 ? 'library' : 'libraries'} registered successfully!`);
+            
+            navigate('/register/success', { 
+              state: { credentials: verifyRes.credentials }
+            });
+          } catch (err) {
+            console.error("Verification failed:", err);
+            setSubmitError(err.message || 'Payment verification failed');
+            toast.error(err.message || 'Payment verification failed');
+            setIsSubmitting(false);
+          }
+        },
+        prefill: {
+          name: payload.libraries[0]?.name || "Library Admin",
+          email: payload.contact_email,
+          contact: payload.contact_phone,
+        },
+        theme: {
+          color: "#0f172a", // Navy color matching brand
+        },
+        modal: {
+          ondismiss: function() {
+            setSubmitError('Payment cancelled by user');
+            toast.error('Payment cancelled');
+            setIsSubmitting(false);
+          }
+        }
       };
 
-      const verifyRes = await verifyPayment(verifyPayload);
-
-      toast.success(`${libraries.length} ${libraries.length === 1 ? 'library' : 'libraries'} registered successfully!`);
-      
-      navigate('/register/success', { 
-        state: { credentials: verifyRes.credentials }
+      const rzp = new window.Razorpay(options);
+      rzp.on('payment.failed', function (response){
+        console.error("Payment failed", response.error);
+        setSubmitError(response.error.description || 'Payment processing failed');
+        toast.error('Payment failed: ' + (response.error.description || 'Try again'));
+        setIsSubmitting(false);
       });
+      rzp.open();
+      
+      // Do NOT set isSubmitting(false) here, we wait for Razorpay UI callbacks
+      return;
       
     } catch (err) {
       console.error(err);
