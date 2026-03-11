@@ -618,6 +618,39 @@ export default function RegisterLibrary() {
   const [comboForms, setComboForms] = useState({});
   const [showComboForms, setShowComboForms] = useState({});
 
+// ComboPriceInput: A small local component to prevent massive React state lag (dropped keystrokes)
+// by holding the input value locally and dispatching onBlur or debounced change
+const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue, onUpdate }) => {
+  const [localValue, setLocalValue] = useState(initialValue);
+
+  // Sync if external prop heavily changes, usually only on mount or clear
+  useEffect(() => {
+    setLocalValue(initialValue);
+  }, [initialValue]);
+
+  const handleBlur = () => {
+    if (localValue !== initialValue) {
+      onUpdate(libIdx, comboId, monthKey, localValue);
+    }
+  };
+
+  return (
+    <input
+      type="number"
+      min="0"
+      className="form-input bg-white text-xs px-2 py-1.5 h-9"
+      placeholder={
+        defaultValue !== '' && defaultValue !== null && defaultValue !== undefined
+          ? String(defaultValue)
+          : 'optional'
+      }
+      value={localValue}
+      onChange={(e) => setLocalValue(e.target.value)}
+      onBlur={handleBlur}
+    />
+  );
+};
+
   const getShiftForm = (libIdx) => shiftForms[libIdx] || createEmptyShiftForm();
   const updateShiftForm = (libIdx, updater) => setShiftForms(prev => ({ ...prev, [libIdx]: typeof updater === 'function' ? updater(getShiftForm(libIdx)) : updater }));
 
@@ -959,18 +992,21 @@ export default function RegisterLibrary() {
       parsedFeePlans[key] = numericFee;
     }
 
-    // Check overlap
+    // Overlap logic
     const newStart = parseInt(sForm.start_time.split(':')[0]) * 60 + parseInt(sForm.start_time.split(':')[1]);
     let newEnd = parseInt(sForm.end_time.split(':')[0]) * 60 + parseInt(sForm.end_time.split(':')[1]);
     if (newEnd <= newStart) newEnd += 24 * 60; // Crosses midnight
 
     const existing = libraries[libIdx].shifts;
+    const editingId = editingShiftIds[libIdx];
+
     for (const es of existing) {
+      if (editingId && es.id === editingId) continue; // Skip overlap check with itself while editing
+
       const eStart = parseInt(es.start_time.split(':')[0]) * 60 + parseInt(es.start_time.split(':')[1]);
       let eEnd = parseInt(es.end_time.split(':')[0]) * 60 + parseInt(es.end_time.split(':')[1]);
       if (eEnd <= eStart) eEnd += 24 * 60;
 
-      // Overlap logic: standard check + handles cases where one shift wraps midnight
       if (Math.max(newStart, eStart) < Math.min(newEnd, eEnd)) {
         toast.error(`Time overlaps with existing shift: ${es.label}`);
         return;
@@ -978,30 +1014,53 @@ export default function RegisterLibrary() {
     }
 
     const duration = calcDuration(sForm.start_time, sForm.end_time);
-    const newShift = {
-      id: Date.now().toString(),
-      label: sForm.label.trim(),
-      start_time: sForm.start_time,
-      end_time: sForm.end_time,
-      duration_hours: duration,
-      monthly_fee: Number(parsedFeePlans['1']),
-      fee_plans: parsedFeePlans,
-      is_base: true
-    };
+    
     setLibraries((prev) => {
       const copy = [...prev];
-      const nextLib = { ...copy[libIdx], shifts: [...copy[libIdx].shifts, newShift] };
-      nextLib.imported_students = recalculateImportedStudentsForLibrary(
-        nextLib,
-        nextLib.imported_students || [],
-      );
+      let nextLibShifts = [...copy[libIdx].shifts];
+      
+      if (editingId) {
+        // Update existing
+        nextLibShifts = nextLibShifts.map((s) => 
+          s.id === editingId ? { ...s, label: sForm.label.trim(), start_time: sForm.start_time, end_time: sForm.end_time, duration_hours: duration, fee_plans: parsedFeePlans, monthly_fee: Number(parsedFeePlans['1']) } : s
+        );
+      } else {
+        // Add new
+        const newShift = {
+          id: Date.now().toString(),
+          label: sForm.label.trim(),
+          start_time: sForm.start_time,
+          end_time: sForm.end_time,
+          duration_hours: duration,
+          monthly_fee: Number(parsedFeePlans['1']),
+          fee_plans: parsedFeePlans,
+          is_base: true
+        };
+        nextLibShifts.push(newShift);
+      }
+
+      const nextLib = { ...copy[libIdx], shifts: nextLibShifts };
+      nextLib.imported_students = recalculateImportedStudentsForLibrary(nextLib, nextLib.imported_students || []);
       copy[libIdx] = nextLib;
       return copy;
     });
+
     updateShiftForm(libIdx, createEmptyShiftForm());
     setShowShiftForms((prev) => ({ ...prev, [libIdx]: false }));
-    // updateAutoCombos is triggered on Continue, or we can call it directly
+    setEditingShiftIds((prev) => ({ ...prev, [libIdx]: null }));
     setTimeout(() => updateAutoCombos(libIdx), 50);
+  };
+
+  const handleEditShift = (libIdx, shift) => {
+    updateShiftForm(libIdx, {
+      label: shift.label,
+      start_time: shift.start_time,
+      end_time: shift.end_time,
+      duration_hours: shift.duration_hours,
+      fee_plans: normalizeFeePlans(shift.fee_plans || {})
+    });
+    setEditingShiftIds((prev) => ({ ...prev, [libIdx]: shift.id }));
+    setShowShiftForms((prev) => ({ ...prev, [libIdx]: true }));
   };
 
   const deleteShift = (libIdx, id) => {
@@ -1994,13 +2053,13 @@ export default function RegisterLibrary() {
                                   : [];
 
                             return (
-                            <div key={s.id} className="shift-card-item">
+                            <div key={s.id} className="shift-card-item" style={{ cursor: 'pointer' }} onClick={() => handleEditShift(libIdx, s)}>
                               <div className="shift-card-header">
                                 <div className="shift-card-title-row">
                                   <span className="material-symbols-rounded" style={{ color: 'var(--color-amber)', fontSize: '1.3rem' }}>light_mode</span>
                                   <h4 className="font-bold text-navy">{s.label}</h4>
                                 </div>
-                                <button className="btn-icon text-danger" onClick={() => deleteShift(libIdx, s.id)} title="Remove shift">
+                                <button className="btn-icon text-danger" onClick={(e) => { e.stopPropagation(); deleteShift(libIdx, s.id); }} title="Remove shift">
                                   <span className="material-symbols-rounded icon-sm">close</span>
                                 </button>
                               </div>
@@ -2033,18 +2092,23 @@ export default function RegisterLibrary() {
                       {/* Add shift form */}
                       {showSF ? (
                         <div className="shift-form-container">
-                          {/* Section 1: Shift Label */}
                           <div className="form-group mb-0">
                             <label className="form-label flex items-center gap-2">
                               <span className="material-symbols-rounded icon-sm" style={{ color: 'var(--color-amber)' }}>label</span>
                               Shift Label
                             </label>
-                            <input
-                              className="form-input bg-white"
+                            <select
+                              className="form-select bg-white"
                               value={shiftForm.label}
                               onChange={(e) => updateShiftForm(libIdx, (p) => ({ ...p, label: e.target.value }))}
-                              placeholder='e.g. "Morning", "Evening", "Night"'
-                            />
+                            >
+                              <option value="Morning">Morning</option>
+                              <option value="Noon">Noon</option>
+                              <option value="Afternoon">Afternoon</option>
+                              <option value="Evening">Evening</option>
+                              <option value="Night">Night</option>
+                              <option value="Full Day">Full Day</option>
+                            </select>
                           </div>
 
                           {/* Section 2: Time Picker */}
@@ -2253,28 +2317,14 @@ export default function RegisterLibrary() {
                                           const customValue = combo.custom_fee_plans?.[monthKey] ?? '';
                                           return (
                                             <div key={`${combo.id}-${monthKey}`} className="form-group mb-0">
-                                              <label className="form-label text-[11px] leading-tight">
-                                                {month}M{month === 1 ? ' *' : ''}
-                                              </label>
-                                              <input
-                                                type="number"
-                                                min="0"
-                                                className="form-input bg-white text-xs px-2 py-1.5 h-9"
-                                                placeholder={
-                                                  defaultValue !== '' && defaultValue !== null && defaultValue !== undefined
-                                                    ? String(defaultValue)
-                                                    : 'optional'
-                                                }
-                                                value={customValue}
-                                                onChange={(e) =>
-                                                  updateComboCustomFee(
-                                                    libIdx,
-                                                    combo.id,
-                                                    monthKey,
-                                                    e.target.value,
-                                                  )
-                                                }
-                                              />
+                                              <ComboPriceInput
+                                                  libIdx={libIdx}
+                                                  comboId={combo.id}
+                                                  monthKey={monthKey}
+                                                  defaultValue={defaultValue}
+                                                  initialValue={customValue}
+                                                  onUpdate={updateComboCustomFee}
+                                                />
                                             </div>
                                           );
                                         })}
