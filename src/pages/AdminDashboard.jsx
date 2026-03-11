@@ -57,6 +57,8 @@ export default function AdminDashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [drawerLib, setDrawerLib] = useState(null);
   const [credModal, setCredModal] = useState(null);
+  const [deleteModal, setDeleteModal] = useState(null);
+  const [deleteInput, setDeleteInput] = useState("");
   const [actionLoading, setActionLoading] = useState(null);
 
   const fetchLibraries = useCallback(async () => {
@@ -143,24 +145,27 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleDelete = async (lib) => {
-    if (!window.confirm(`⚠️ PERMANENTLY DELETE "${lib.name}"?\n\nThis will remove ALL data including students, seats, lockers, shifts, and memberships. This action CANNOT be undone.`)) {
-      return;
-    }
-    const enteredName = window.prompt(`Are you absolutely sure? Type the library name to confirm: This will delete "${lib.name}" forever.`);
-    if (enteredName !== lib.name) {
-      if (enteredName !== null) {
-        toast.error("Library name did not match. Deletion cancelled.");
-      }
+  const handleDeleteClick = (lib) => {
+    setDeleteModal(lib);
+    setDeleteInput("");
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteModal) return;
+    if (deleteInput !== deleteModal.name) {
+      toast.error("Library name did not match. Deletion cancelled.");
       return;
     }
 
-    setActionLoading(lib.id);
+    setActionLoading(deleteModal.id);
     try {
-      await deleteLibrary(token, lib.id);
+      await deleteLibrary(token, deleteModal.id);
       await fetchLibraries();
-      setDrawerLib(null);
-      toast.success(`"${lib.name}" has been permanently deleted`);
+      if (drawerLib?.id === deleteModal.id) {
+        setDrawerLib(null);
+      }
+      toast.success(`"${deleteModal.name}" has been permanently deleted`);
+      setDeleteModal(null);
     } catch (err) {
       toast.error(err.message || "Failed to delete library");
     } finally {
@@ -298,7 +303,7 @@ export default function AdminDashboard() {
       <button
         className="btn btn-danger-outline btn-sm"
         disabled={actionLoading === lib.id}
-        onClick={() => handleDelete(lib)}
+        onClick={() => handleDeleteClick(lib)}
         title="Delete library permanently"
       >
         <span className="material-symbols-rounded icon-sm">delete_forever</span>
@@ -875,7 +880,7 @@ export default function AdminDashboard() {
 
               <button
                 className="btn btn-danger-outline"
-                onClick={() => handleDelete(drawerLib)}
+                onClick={() => handleDeleteClick(drawerLib)}
               >
                 <span className="material-symbols-rounded icon-sm">delete_forever</span>
                 Delete permanently
@@ -922,6 +927,58 @@ export default function AdminDashboard() {
                 onClick={() => setCredModal(null)}
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteModal && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <h3 style={{ color: "var(--color-danger)", marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              <span className="material-symbols-rounded">warning</span>
+              Permanently Delete Library
+            </h3>
+            <p style={{ marginBottom: "1rem", color: "var(--color-text-main)", lineHeight: "1.5" }}>
+              Are you absolutely sure you want to delete <strong>{deleteModal.name}</strong>?
+              <br /><br />
+              This will remove ALL data including students, seats, lockers, shifts, and memberships. This action <strong style={{color: "var(--color-danger)"}}>CANNOT be undone.</strong>
+            </p>
+            
+            <div className="form-group" style={{ marginBottom: "1.5rem" }}>
+              <label className="form-label" style={{ marginBottom: "0.5rem", display: "block" }}>
+                Type <strong style={{userSelect: "none"}}>{deleteModal.name}</strong> to confirm:
+              </label>
+              <input
+                type="text"
+                className="form-input"
+                placeholder={deleteModal.name}
+                value={deleteInput}
+                onChange={(e) => setDeleteInput(e.target.value)}
+                autoFocus
+              />
+            </div>
+
+            <div style={{ display: "flex", gap: "1rem", justifyContent: "flex-end" }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setDeleteModal(null)}
+                disabled={actionLoading === deleteModal.id}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-danger"
+                onClick={confirmDelete}
+                disabled={deleteInput !== deleteModal.name || actionLoading === deleteModal.id}
+                style={{ 
+                  opacity: deleteInput !== deleteModal.name ? 0.5 : 1, 
+                  cursor: deleteInput !== deleteModal.name ? "not-allowed" : "pointer",
+                  transition: "all 0.2s ease"
+                }}
+              >
+                {actionLoading === deleteModal.id ? "Deleting..." : "Delete Permanently"}
               </button>
             </div>
           </div>
