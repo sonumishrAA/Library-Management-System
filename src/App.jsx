@@ -14,6 +14,7 @@ import ContactPage from "./pages/ContactPage.jsx";
 import DocsPage from "./pages/DocsPage.jsx";
 import LegalPage from "./pages/LegalPage.jsx";
 import FounderPage from "./pages/FounderPage.jsx";
+import NotFoundPage from "./pages/NotFoundPage.jsx";
 
 export default function App() {
   return (
@@ -50,6 +51,7 @@ export default function App() {
           </ProtectedAdminRoute>
         }
       />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
 }
