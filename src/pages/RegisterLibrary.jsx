@@ -708,6 +708,7 @@ export default function RegisterLibrary() {
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
   const [libraries, setLibraries] = useState([createInitialLibraryForm()]);
+  const [staffAccountMode, setStaffAccountMode] = useState('separate');
   const [activeLibIndex, setActiveLibIndex] = useState(0);
   const [errors, setErrors] = useState({});
   const [confirmed, setConfirmed] = useState(false);
@@ -809,6 +810,8 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
   const getComboForm = (libIdx) => comboForms[libIdx] || { selectedShifts: [], combined_fee: '' };
   const updateComboForm = (libIdx, updater) => setComboForms(prev => ({ ...prev, [libIdx]: typeof updater === 'function' ? updater(getComboForm(libIdx)) : updater }));
 
+  const isMultiLibrary = libraries.length > 1;
+
   const hasLockersAnywhere = libraries.some(lib => {
     const maleL = parseInt(lib.male_lockers) || 0;
     const femaleL = parseInt(lib.female_lockers) || 0;
@@ -863,6 +866,100 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
     });
     if (errors[`${libIdx}_${field}`]) setErrors((prev) => ({ ...prev, [`${libIdx}_${field}`]: '' }));
   };
+
+  const clearCredentialErrors = (field) => {
+    setErrors((prev) => {
+      const next = { ...prev };
+      libraries.forEach((_, idx) => {
+        delete next[`${idx}_${field}`];
+      });
+      return next;
+    });
+  };
+
+  const updateAdminField = (libIdx, field, value) => {
+    if (!isMultiLibrary) {
+      updateLibField(libIdx, field, value);
+      return;
+    }
+    setLibraries((prev) => prev.map((lib) => ({ ...lib, [field]: value })));
+    clearCredentialErrors(field);
+  };
+
+  const updateStaffField = (libIdx, field, value) => {
+    if (!isMultiLibrary || staffAccountMode === 'separate') {
+      updateLibField(libIdx, field, value);
+      return;
+    }
+    setLibraries((prev) => prev.map((lib) => ({ ...lib, [field]: value })));
+    clearCredentialErrors(field);
+  };
+
+  const setStaffEnabled = (libIdx, enabled) => {
+    if (!isMultiLibrary || staffAccountMode === 'separate') {
+      setLibraries((prev) =>
+        prev.map((item, idx) =>
+          idx === libIdx
+            ? {
+                ...item,
+                staff_enabled: enabled,
+                staff_email: enabled ? item.staff_email : '',
+                staff_password: enabled ? item.staff_password : '',
+              }
+            : item,
+        ),
+      );
+      clearCredentialErrors('staff_email');
+      clearCredentialErrors('staff_password');
+      return;
+    }
+
+    setLibraries((prev) =>
+      prev.map((item, idx) => {
+        const source = prev[0] || {};
+        return {
+          ...item,
+          staff_enabled: enabled,
+          staff_email: enabled
+            ? (idx === 0 ? item.staff_email : source.staff_email) || ''
+            : '',
+          staff_password: enabled
+            ? (idx === 0 ? item.staff_password : source.staff_password) || ''
+            : '',
+        };
+      }),
+    );
+    clearCredentialErrors('staff_email');
+    clearCredentialErrors('staff_password');
+  };
+
+  useEffect(() => {
+    if (libraries.length <= 1 && staffAccountMode !== 'separate') {
+      setStaffAccountMode('separate');
+    }
+  }, [libraries.length, staffAccountMode]);
+
+  useEffect(() => {
+    if (libraries.length <= 1) return;
+    setLibraries((prev) => {
+      const source = prev[0];
+      if (!source) return prev;
+      let changed = false;
+      const next = prev.map((lib, idx) => {
+        if (idx === 0) return lib;
+        if ((lib.admin_email || '') === (source.admin_email || '') && (lib.admin_password || '') === (source.admin_password || '')) {
+          return lib;
+        }
+        changed = true;
+        return {
+          ...lib,
+          admin_email: source.admin_email || '',
+          admin_password: source.admin_password || '',
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [libraries.length, libraries[0]?.admin_email, libraries[0]?.admin_password]);
 
   /* ─── Validation (checks ALL libraries) ─── */
   const validateStep1 = () => {
@@ -1996,7 +2093,22 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
 
   /* ─── Library tab helpers ─── */
   const addNewLibrary = () => {
-    setLibraries((prev) => [...prev, createInitialLibraryForm()]);
+    setLibraries((prev) => {
+      const base = prev[0] || createInitialLibraryForm();
+      const nextLibrary = {
+        ...createInitialLibraryForm(),
+        admin_email: base.admin_email || '',
+        admin_password: base.admin_password || '',
+      };
+
+      if (staffAccountMode === 'shared') {
+        nextLibrary.staff_enabled = Boolean(base.staff_enabled);
+        nextLibrary.staff_email = base.staff_email || '';
+        nextLibrary.staff_password = base.staff_password || '';
+      }
+
+      return [...prev, nextLibrary];
+    });
     setActiveLibIndex(libraries.length);
     setPincodeStatus('');
     setStep(1); // Force back to step 1 to fill basic info
@@ -3168,13 +3280,78 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                 Account Credentials Setup
               </h2>
               <p className="text-sm mb-6 text-muted">
-                Owner email is prefilled for admin. Set passwords and optionally add a staff account for each library.
+                Owner email is prefilled for admin. For multiple libraries, owner login is shared across all libraries.
               </p>
+
+              {isMultiLibrary && (
+                <div className="p-4 rounded-xl mb-6" style={{ background: 'var(--color-surface-dark)', border: '1px solid var(--color-border)' }}>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-xs text-muted uppercase tracking-wide mb-2">Owner Account Mode</div>
+                      <div className="font-semibold text-navy">Shared owner login for all libraries</div>
+                      <div className="text-xs text-muted mt-1">
+                        Admin email/password entered in first card will auto-apply to every library.
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="text-xs text-muted uppercase tracking-wide mb-2">Staff Account Mode</div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className={`btn btn-sm ${staffAccountMode === 'shared' ? 'btn-primary' : 'btn-secondary'}`}
+                          onClick={() => {
+                            setStaffAccountMode('shared');
+                            setLibraries((prev) => {
+                              const source = prev[0] || {};
+                              return prev.map((lib) => ({
+                                ...lib,
+                                staff_enabled: Boolean(source.staff_enabled),
+                                staff_email: source.staff_email || '',
+                                staff_password: source.staff_password || '',
+                              }));
+                            });
+                            clearCredentialErrors('staff_email');
+                            clearCredentialErrors('staff_password');
+                          }}
+                        >
+                          Shared Staff
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn btn-sm ${staffAccountMode === 'separate' ? 'btn-primary' : 'btn-secondary'}`}
+                          onClick={() => setStaffAccountMode('separate')}
+                        >
+                          Separate Staff
+                        </button>
+                      </div>
+                      <div className="text-xs text-muted mt-2">
+                        Shared mode uses one staff credential for all libraries. Separate mode keeps staff per library.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="flex flex-col gap-6">
                 {libraries.map((lib, libIdx) => {
                   const ownerEmail = libraries[0]?.contact_email || '';
-                  const adminEmailValue = lib.admin_email || ownerEmail;
+                  const sharedAdminEmail = (libraries[0]?.admin_email || ownerEmail || '').trim();
+                  const sharedAdminPassword = libraries[0]?.admin_password || '';
+                  const adminEmailValue = isMultiLibrary ? sharedAdminEmail : (lib.admin_email || ownerEmail);
+                  const adminPasswordValue = isMultiLibrary ? sharedAdminPassword : lib.admin_password;
+                  const lockAdminForThisCard = isMultiLibrary && libIdx > 0;
+                  const isSharedStaffMode = isMultiLibrary && staffAccountMode === 'shared';
+                  const staffEnabledValue = isSharedStaffMode
+                    ? Boolean(libraries[0]?.staff_enabled)
+                    : Boolean(lib.staff_enabled);
+                  const staffEmailValue = isSharedStaffMode
+                    ? (libraries[0]?.staff_email || '')
+                    : (lib.staff_email || '');
+                  const staffPasswordValue = isSharedStaffMode
+                    ? (libraries[0]?.staff_password || '')
+                    : (lib.staff_password || '');
+                  const lockSharedStaffForThisCard = isSharedStaffMode && libIdx > 0;
                   return (
                     <div key={libIdx} className="p-5 rounded-xl bg-white shadow-sm" style={{ border: '1px solid var(--color-border)' }}>
                       <h3 className="font-bold text-lg pb-3 mb-4 flex items-center gap-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
@@ -3191,11 +3368,16 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                               type="email"
                               className={`form-input ${errors[`${libIdx}_admin_email`] ? 'error' : ''}`}
                               value={adminEmailValue}
-                              onChange={(e) => updateLibField(libIdx, 'admin_email', e.target.value)}
+                              onChange={(e) => updateAdminField(libIdx, 'admin_email', e.target.value)}
                               placeholder="admin@library.com"
+                              disabled={lockAdminForThisCard}
                             />
                             {errors[`${libIdx}_admin_email`] && <div className="form-error">{errors[`${libIdx}_admin_email`]}</div>}
-                            <div className="text-xs text-muted mt-1">Prefilled from owner contact email.</div>
+                            <div className="text-xs text-muted mt-1">
+                              {lockAdminForThisCard
+                                ? 'This library uses the same owner login as the first library.'
+                                : 'Prefilled from owner contact email.'}
+                            </div>
                           </div>
                           <div className="form-group mb-0">
                             <label className="form-label">Admin Password</label>
@@ -3203,14 +3385,16 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                               <input
                                 type="text"
                                 className={`form-input ${errors[`${libIdx}_admin_password`] ? 'error' : ''}`}
-                                value={lib.admin_password}
-                                onChange={(e) => updateLibField(libIdx, 'admin_password', e.target.value)}
+                                value={adminPasswordValue}
+                                onChange={(e) => updateAdminField(libIdx, 'admin_password', e.target.value)}
                                 placeholder="Minimum 6 characters"
+                                disabled={lockAdminForThisCard}
                               />
                               <button
                                 type="button"
                                 className="btn btn-secondary btn-sm"
-                                onClick={() => updateLibField(libIdx, 'admin_password', generateTempPassword())}
+                                onClick={() => updateAdminField(libIdx, 'admin_password', generateTempPassword())}
+                                disabled={lockAdminForThisCard}
                               >
                                 Generate
                               </button>
@@ -3228,35 +3412,25 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                           <input
                             type="checkbox"
                             className="form-checkbox"
-                            checked={Boolean(lib.staff_enabled)}
+                            checked={staffEnabledValue}
                             onChange={(e) => {
-                              const enabled = e.target.checked;
-                              setLibraries((prev) =>
-                                prev.map((item, idx) =>
-                                  idx === libIdx
-                                    ? {
-                                        ...item,
-                                        staff_enabled: enabled,
-                                        staff_email: enabled ? item.staff_email : '',
-                                        staff_password: enabled ? item.staff_password : '',
-                                      }
-                                    : item,
-                                ),
-                              );
+                              if (lockSharedStaffForThisCard) return;
+                              setStaffEnabled(libIdx, e.target.checked);
                             }}
+                            disabled={lockSharedStaffForThisCard}
                           />
-                          <span>Add Staff Account</span>
+                          <span>{isSharedStaffMode ? 'Add Shared Staff Account' : 'Add Staff Account'}</span>
                         </label>
 
-                        {lib.staff_enabled && (
+                        {staffEnabledValue && !lockSharedStaffForThisCard && (
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div className="form-group mb-0">
                               <label className="form-label">Staff Email</label>
                               <input
                                 type="email"
                                 className={`form-input ${errors[`${libIdx}_staff_email`] ? 'error' : ''}`}
-                                value={lib.staff_email}
-                                onChange={(e) => updateLibField(libIdx, 'staff_email', e.target.value)}
+                                value={staffEmailValue}
+                                onChange={(e) => updateStaffField(libIdx, 'staff_email', e.target.value)}
                                 placeholder="staff@library.com"
                               />
                               {errors[`${libIdx}_staff_email`] && <div className="form-error">{errors[`${libIdx}_staff_email`]}</div>}
@@ -3267,20 +3441,26 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                                 <input
                                   type="text"
                                   className={`form-input ${errors[`${libIdx}_staff_password`] ? 'error' : ''}`}
-                                  value={lib.staff_password}
-                                  onChange={(e) => updateLibField(libIdx, 'staff_password', e.target.value)}
+                                  value={staffPasswordValue}
+                                  onChange={(e) => updateStaffField(libIdx, 'staff_password', e.target.value)}
                                   placeholder="Minimum 6 characters"
                                 />
                                 <button
                                   type="button"
                                   className="btn btn-secondary btn-sm"
-                                  onClick={() => updateLibField(libIdx, 'staff_password', generateTempPassword())}
+                                  onClick={() => updateStaffField(libIdx, 'staff_password', generateTempPassword())}
                                 >
                                   Generate
                                 </button>
                               </div>
                               {errors[`${libIdx}_staff_password`] && <div className="form-error">{errors[`${libIdx}_staff_password`]}</div>}
                             </div>
+                          </div>
+                        )}
+
+                        {lockSharedStaffForThisCard && (
+                          <div className="text-xs text-muted">
+                            This library uses the shared staff credentials configured in the first library card.
                           </div>
                         )}
 
