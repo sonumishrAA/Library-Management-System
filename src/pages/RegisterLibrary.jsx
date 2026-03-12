@@ -1585,177 +1585,180 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
         return;
       }
 
+      const activeLibrary = libraries[libIdx];
+      if (!activeLibrary) {
+        toast.error('Library context not found for CSV import');
+        return;
+      }
+
       let importedCount = 0;
       let skippedCount = 0;
+      const baseShiftOptions = (activeLibrary.shifts || []).map((shift, orderIndex) => ({
+        id: shift.id,
+        label: shift.label,
+        start_time: shift.start_time,
+        orderIndex,
+      }));
+      const offeredCombos = (activeLibrary.combinedPricing || [])
+        .filter((combo) => combo.is_offered)
+        .map((combo) => ({
+          id: combo.id,
+          label: combo.label,
+          shift_ids: Array.isArray(combo.shift_ids) ? combo.shift_ids.filter(Boolean) : [],
+        }));
+
+      const shiftLookup = new Map();
+      const baseShiftAliasLookup = new Map();
+      const baseShiftIdSet = new Set(baseShiftOptions.map((shift) => shift.id));
+      const baseShiftOrderLookup = new Map(
+        baseShiftOptions.map((shift) => [shift.id, shift.orderIndex]),
+      );
+      const comboByShiftSetLookup = new Map(
+        offeredCombos
+          .filter((combo) => combo.shift_ids.length > 1)
+          .map((combo) => [combo.shift_ids.slice().sort().join('|'), combo.id]),
+      );
+
+      const registerLookup = (key, value) => {
+        if (!key || !value) return;
+        if (!shiftLookup.has(key)) shiftLookup.set(key, value);
+      };
+
+      baseShiftOptions.forEach((shift) => {
+        const labelKey = normalizeShiftLabelKey(shift.label);
+        registerLookup(labelKey, shift.id);
+        const labelAlias = toCanonicalShiftAlias(shift.label);
+        if (labelAlias) {
+          if (!baseShiftAliasLookup.has(labelAlias)) baseShiftAliasLookup.set(labelAlias, shift.id);
+          registerLookup(labelAlias, shift.id);
+        }
+
+        const timeAlias = inferShiftAliasFromStartTime(shift.start_time);
+        if (timeAlias && !baseShiftAliasLookup.has(timeAlias)) {
+          baseShiftAliasLookup.set(timeAlias, shift.id);
+          registerLookup(timeAlias, shift.id);
+        }
+      });
+
+      offeredCombos.forEach((combo) => {
+        registerLookup(normalizeShiftLabelKey(combo.label), combo.id);
+      });
+
+      const unmatchedShiftLabels = new Set();
+
+      const resolveShiftIdByLabel = (label) => {
+        const directKey = normalizeShiftLabelKey(label);
+        if (!directKey) return '';
+        if (shiftLookup.has(directKey)) return shiftLookup.get(directKey) || '';
+
+        const parts = splitShiftLabelParts(label);
+        if (parts.length === 0) return '';
+
+        if (parts.length === 1) {
+          const singlePartAlias = toCanonicalShiftAlias(parts[0]);
+          return baseShiftAliasLookup.get(singlePartAlias) || '';
+        }
+
+        const resolvedBaseShiftIds = Array.from(
+          new Set(
+            parts
+              .map((part) => {
+                const partKey = normalizeShiftLabelKey(part);
+                const directMatch = shiftLookup.get(partKey);
+                if (directMatch && baseShiftIdSet.has(directMatch)) return directMatch;
+                const partAlias = toCanonicalShiftAlias(part);
+                return baseShiftAliasLookup.get(partAlias) || '';
+              })
+              .filter(Boolean),
+          ),
+        );
+
+        if (resolvedBaseShiftIds.length !== parts.length) {
+          return '';
+        }
+
+        const normalizedComboKey = resolvedBaseShiftIds
+          .slice()
+          .sort((a, b) => (baseShiftOrderLookup.get(a) ?? 0) - (baseShiftOrderLookup.get(b) ?? 0))
+          .join('|');
+
+        return comboByShiftSetLookup.get(normalizedComboKey) || '';
+      };
+
+      const newStudents = [];
+
+      for (let rowIndex = 1; rowIndex < rows.length; rowIndex += 1) {
+        const row = rows[rowIndex];
+
+        const getCellValue = (key) => {
+          const cellIndex = findHeaderIndex(key);
+          if (cellIndex === -1) return '';
+          return String(row[cellIndex] || '').trim();
+        };
+
+        const name = getCellValue('name');
+        const phone = getCellValue('phone');
+        const shiftLabel = getCellValue('shift_label');
+        const shiftId = resolveShiftIdByLabel(shiftLabel);
+
+        if (!name && !phone && !shiftLabel) {
+          skippedCount += 1;
+          continue;
+        }
+
+        if (!name || !phone || !shiftId) {
+          if (name && phone && !shiftId && shiftLabel) {
+            unmatchedShiftLabels.add(shiftLabel);
+          }
+          skippedCount += 1;
+          continue;
+        }
+
+        const admissionDateRaw = getCellValue('admission_date');
+        const parsedAdmissionDate = /^\d{4}-\d{2}-\d{2}$/.test(admissionDateRaw)
+          ? admissionDateRaw
+          : getTodayDateISO();
+        const duration = normalizeDurationMonths(getCellValue('plan_duration'));
+
+        newStudents.push(
+          createStudentRow({
+            name,
+            father_name: getCellValue('father_name'),
+            phone,
+            gender: normalizeStudentGender(getCellValue('gender')),
+            address: getCellValue('address'),
+            shift_id: shiftId,
+            plan_duration: String(duration),
+            admission_date: parsedAdmissionDate,
+            payment_status: normalizePaymentStatus(getCellValue('payment_status')),
+            has_locker: parseCsvBoolean(getCellValue('has_locker')),
+            locker_no: getCellValue('locker_no'),
+          }),
+        );
+        importedCount += 1;
+      }
+
+      if (importedCount === 0) {
+        if (unmatchedShiftLabels.size > 0) {
+          const examples = Array.from(unmatchedShiftLabels).slice(0, 5).join(' | ');
+          toast.error(`No valid rows. Unmatched shift_label: ${examples}`);
+        }
+        toast.error('No valid student rows found in CSV');
+        return;
+      }
 
       setLibraries((prev) =>
         prev.map((lib, idx) => {
           if (idx !== libIdx) return lib;
-
-          const baseShiftOptions = (lib.shifts || []).map((shift, orderIndex) => ({
-            id: shift.id,
-            label: shift.label,
-            start_time: shift.start_time,
-            orderIndex,
-          }));
-          const offeredCombos = (lib.combinedPricing || [])
-            .filter((combo) => combo.is_offered)
-            .map((combo) => ({
-              id: combo.id,
-              label: combo.label,
-              shift_ids: Array.isArray(combo.shift_ids) ? combo.shift_ids.filter(Boolean) : [],
-            }));
-
-          const shiftLookup = new Map();
-          const baseShiftAliasLookup = new Map();
-          const baseShiftIdSet = new Set(baseShiftOptions.map((shift) => shift.id));
-          const baseShiftOrderLookup = new Map(
-            baseShiftOptions.map((shift) => [shift.id, shift.orderIndex]),
-          );
-          const comboByShiftSetLookup = new Map(
-            offeredCombos
-              .filter((combo) => combo.shift_ids.length > 1)
-              .map((combo) => [combo.shift_ids.slice().sort().join('|'), combo.id]),
-          );
-
-          const registerLookup = (key, value) => {
-            if (!key || !value) return;
-            if (!shiftLookup.has(key)) shiftLookup.set(key, value);
-          };
-
-          baseShiftOptions.forEach((shift) => {
-            const labelKey = normalizeShiftLabelKey(shift.label);
-            registerLookup(labelKey, shift.id);
-            const labelAlias = toCanonicalShiftAlias(shift.label);
-            if (labelAlias) {
-              if (!baseShiftAliasLookup.has(labelAlias)) baseShiftAliasLookup.set(labelAlias, shift.id);
-              registerLookup(labelAlias, shift.id);
-            }
-
-            const timeAlias = inferShiftAliasFromStartTime(shift.start_time);
-            if (timeAlias && !baseShiftAliasLookup.has(timeAlias)) {
-              baseShiftAliasLookup.set(timeAlias, shift.id);
-              registerLookup(timeAlias, shift.id);
-            }
-          });
-
-          offeredCombos.forEach((combo) => {
-            registerLookup(normalizeShiftLabelKey(combo.label), combo.id);
-          });
-
-          const unmatchedShiftLabels = new Set();
-          let importedCountForLibrary = 0;
-
-          const resolveShiftIdByLabel = (label) => {
-            const directKey = normalizeShiftLabelKey(label);
-            if (!directKey) return '';
-            if (shiftLookup.has(directKey)) return shiftLookup.get(directKey) || '';
-
-            const parts = splitShiftLabelParts(label);
-            if (parts.length === 0) return '';
-
-            if (parts.length === 1) {
-              const singlePartAlias = toCanonicalShiftAlias(parts[0]);
-              return baseShiftAliasLookup.get(singlePartAlias) || '';
-            }
-
-            const resolvedBaseShiftIds = Array.from(
-              new Set(
-                parts
-                  .map((part) => {
-                    const partKey = normalizeShiftLabelKey(part);
-                    const directMatch = shiftLookup.get(partKey);
-                    if (directMatch && baseShiftIdSet.has(directMatch)) return directMatch;
-                    const partAlias = toCanonicalShiftAlias(part);
-                    return baseShiftAliasLookup.get(partAlias) || '';
-                  })
-                  .filter(Boolean),
-              ),
-            );
-
-            if (resolvedBaseShiftIds.length !== parts.length) {
-              return '';
-            }
-
-            const normalizedComboKey = resolvedBaseShiftIds
-              .slice()
-              .sort((a, b) => (baseShiftOrderLookup.get(a) ?? 0) - (baseShiftOrderLookup.get(b) ?? 0))
-              .join('|');
-
-            return comboByShiftSetLookup.get(normalizedComboKey) || '';
-          };
-
-          const newStudents = [];
-
-          for (let rowIndex = 1; rowIndex < rows.length; rowIndex += 1) {
-            const row = rows[rowIndex];
-
-            const getCellValue = (key) => {
-              const cellIndex = findHeaderIndex(key);
-              if (cellIndex === -1) return '';
-              return String(row[cellIndex] || '').trim();
-            };
-
-            const name = getCellValue('name');
-            const phone = getCellValue('phone');
-            const shiftLabel = getCellValue('shift_label');
-            const shiftId = resolveShiftIdByLabel(shiftLabel);
-
-            if (!name && !phone && !shiftLabel) {
-              skippedCount += 1;
-              continue;
-            }
-
-            if (!name || !phone || !shiftId) {
-              if (name && phone && !shiftId && shiftLabel) {
-                unmatchedShiftLabels.add(shiftLabel);
-              }
-              skippedCount += 1;
-              continue;
-            }
-
-            const admissionDateRaw = getCellValue('admission_date');
-            const parsedAdmissionDate = /^\d{4}-\d{2}-\d{2}$/.test(admissionDateRaw)
-              ? admissionDateRaw
-              : getTodayDateISO();
-            const duration = normalizeDurationMonths(getCellValue('plan_duration'));
-
-            newStudents.push(
-              createStudentRow({
-                name,
-                father_name: getCellValue('father_name'),
-                phone,
-                gender: normalizeStudentGender(getCellValue('gender')),
-                address: getCellValue('address'),
-                shift_id: shiftId,
-                plan_duration: String(duration),
-                admission_date: parsedAdmissionDate,
-                payment_status: normalizePaymentStatus(getCellValue('payment_status')),
-                has_locker: parseCsvBoolean(getCellValue('has_locker')),
-                locker_no: getCellValue('locker_no'),
-              }),
-            );
-            importedCount += 1;
-            importedCountForLibrary += 1;
-          }
-
           const nextStudents = recalculateImportedStudentsForLibrary(lib, [
             ...(lib.imported_students || []),
             ...newStudents,
           ]);
-
-          if (importedCountForLibrary === 0 && unmatchedShiftLabels.size > 0) {
-            const examples = Array.from(unmatchedShiftLabels).slice(0, 5).join(' | ');
-            toast.error(`No valid rows. Unmatched shift_label: ${examples}`);
-          }
-
           return { ...lib, imported_students: nextStudents };
         }),
       );
 
-      if (importedCount === 0) {
-        toast.error('No valid student rows found in CSV');
-      } else if (skippedCount > 0) {
+      if (skippedCount > 0) {
         toast.success(`Imported ${importedCount} students. Skipped ${skippedCount} invalid rows.`);
       } else {
         toast.success(`Imported ${importedCount} students successfully.`);
