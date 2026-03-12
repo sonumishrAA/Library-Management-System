@@ -181,6 +181,28 @@ serve(async (req: Request) => {
         console.error(`Failed to invoke init-lockers for ${libraryId}:`, e);
       }
 
+      // Map local shift IDs to DB shift IDs
+      const localIdToLabel = new Map<string, string>();
+      if (matchingLibPayload && Array.isArray(matchingLibPayload.shifts)) {
+        matchingLibPayload.shifts.forEach((s: any) => {
+          if (s.id && s.label) {
+            localIdToLabel.set(s.id, s.label);
+          }
+        });
+      }
+
+      const { data: dbShifts } = await supabase
+        .from("shifts")
+        .select("id, label")
+        .eq("library_id", libraryId);
+
+      const labelToDbId = new Map<string, string>();
+      if (dbShifts) {
+        dbShifts.forEach((s: any) => {
+          labelToDbId.set(s.label, s.id);
+        });
+      }
+
       // Insert imported students if any
       if (matchingLibPayload && matchingLibPayload.imported_students) {
         for (const student of matchingLibPayload.imported_students) {
@@ -189,11 +211,21 @@ serve(async (req: Request) => {
            const durationMonths = Number(student.plan_duration || 1);
            const startDate = student.admission_date || getTodayISO();
            const endDate = student.end_date || addMonthsISO(startDate, durationMonths);
-           const shiftIds = Array.isArray(student.shift_ids)
+           const rawShiftIds = Array.isArray(student.shift_ids)
              ? student.shift_ids
              : student.shift_id
                ? [student.shift_id]
                : [];
+
+           // Map local frontend shift IDs to DB shift IDs
+           const shiftIds = rawShiftIds.map((localId: string) => {
+             const label = localIdToLabel.get(localId);
+             if (label && labelToDbId.has(label)) {
+               return labelToDbId.get(label)!;
+             }
+             return localId; // Fallback to raw ID
+           });
+
            if (shiftIds.length === 0) continue;
 
            const studentPayload = {
@@ -215,7 +247,7 @@ serve(async (req: Request) => {
            };
 
            try {
-             await fetch(`${supabaseUrl}/functions/v1/add-student`, {
+             const res = await fetch(`${supabaseUrl}/functions/v1/add-student`, {
                method: 'POST',
                headers: {
                  'Content-Type': 'application/json',
@@ -223,8 +255,15 @@ serve(async (req: Request) => {
                },
                body: JSON.stringify(studentPayload)
              });
+             
+             if (!res.ok) {
+               const errorText = await res.text();
+               console.error(`Failed to add student for ${libraryId}:`, errorText);
+               throw new Error(`Add student failed: ${errorText}`);
+             }
            } catch (e) {
-             console.error(`Failed to add student for ${libraryId}:`, e);
+             console.error(`Error invoking add-student for ${libraryId}:`, e);
+             throw e; // Fail the payment verification so the admin knows students weren't imported
            }
         }
       }

@@ -35,6 +35,13 @@ serve(async (req: Request) => {
       });
     }
 
+    if (!seat_number || String(seat_number).trim() === "") {
+      return new Response(JSON.stringify({ error: "Seat number is mandatory" }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, serviceRoleKey);
@@ -81,8 +88,8 @@ serve(async (req: Request) => {
       student_id,
       library_id,
       shift_id: sId,
-      seat_number: seat_number || null,
-      locker_number: assign_locker && locker_number ? locker_number : null,
+      seat_number: seat_number,
+      locker_number: assign_locker && locker_number ? locker_number : "",
       start_date,
       end_date,
       amount_paid: Number.isFinite(numericAmount) ? numericAmount : 0,

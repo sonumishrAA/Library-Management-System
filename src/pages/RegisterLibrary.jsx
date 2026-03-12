@@ -562,6 +562,7 @@ export default function RegisterLibrary() {
   const [errors, setErrors] = useState({});
   const [confirmed, setConfirmed] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const studentCsvInputRefs = useRef({});
 
@@ -1669,6 +1670,7 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
         order_id: orderRes.order_id,
         handler: async function (response) {
           try {
+            setIsVerifying(true);
             // 4. Verify Payment upon successful razorpay checkout
             const verifyPayload = {
               razorpay_order_id: response.razorpay_order_id,
@@ -1690,6 +1692,7 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
             setSubmitError(err.message || 'Payment verification failed');
             toast.error(err.message || 'Payment verification failed');
             setIsSubmitting(false);
+            setIsVerifying(false);
           }
         },
         prefill: {
@@ -1770,7 +1773,16 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
 
   return (
     <div className="register-page">
-          <div className="register-topbar">
+      {isVerifying && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-white/90 backdrop-blur-sm">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-amber-500 mb-4"></div>
+          <h2 className="text-2xl font-bold text-navy-900 mb-2">Processing Payment...</h2>
+          <p className="text-slate-600 text-center max-w-md">
+            Please wait while we set up your library and generate your credentials. Do not refresh or close this page.
+          </p>
+        </div>
+      )}
+      <div className="register-topbar">
         <div className="container">
           <div className="register-topbar-inner">
             <Link to="/" className="nav-logo no-underline">
