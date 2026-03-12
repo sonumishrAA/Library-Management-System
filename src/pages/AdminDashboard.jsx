@@ -222,6 +222,24 @@ export default function AdminDashboard() {
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
     .slice(0, 5);
 
+  const shiftLabelLookup = libraries.reduce((acc, lib) => {
+    const labelsById = {};
+    (lib.shifts || []).forEach((shift) => {
+      if (shift?.id) labelsById[shift.id] = shift.label || "";
+    });
+    acc[lib.id] = labelsById;
+    return acc;
+  }, {});
+
+  const getShiftLabelForMembership = (student, membership) => {
+    if (!membership?.shift_id) return "";
+    const fromStudentPayload = membership?.shifts?.label || membership?.shift?.label;
+    if (fromStudentPayload) return fromStudentPayload;
+
+    const byLibrary = shiftLabelLookup[student.library_id] || {};
+    return byLibrary[membership.shift_id] || "";
+  };
+
   const overviewStats = [
     {
       label: "Registered Libraries",
@@ -659,7 +677,17 @@ export default function AdminDashboard() {
                       </tr>
                     ) : (
                       students.map((student) => {
-                        const membership = student.memberships?.[0] || {};
+                        const memberships = Array.isArray(student.memberships)
+                          ? student.memberships
+                          : [];
+                        const membership = memberships[0] || {};
+                        const shiftNames = Array.from(
+                          new Set(
+                            memberships
+                              .map((m) => getShiftLabelForMembership(student, m))
+                              .filter(Boolean),
+                          ),
+                        );
                         return (
                           <tr key={student.id}>
                             <td>
@@ -679,7 +707,7 @@ export default function AdminDashboard() {
                               )}
                             </td>
                             <td>
-                              {membership.shift_id ? "Assigned" : "—"}
+                              {shiftNames.length > 0 ? shiftNames.join(" + ") : "—"}
                             </td>
                             <td>
                               <span className={`badge ${student.status === "active" ? "badge-active" : "badge-suspended"}`}>
