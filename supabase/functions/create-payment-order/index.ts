@@ -127,6 +127,7 @@ serve(async (req: Request) => {
 
     let totalAmount = 0;
     const unresolvedLibraries: Array<{ library_id: string; reason: string }> = [];
+    const matchedPlanIds = new Set<string>();
     const normalizedSelections = plan_selections as Record<string, PlanSelectionValue>;
 
     for (const rawLibraryId of library_ids) {
@@ -166,6 +167,10 @@ serve(async (req: Request) => {
         continue;
       }
 
+      if (typeof matchedPlan.id === "string" && matchedPlan.id.trim()) {
+        matchedPlanIds.add(matchedPlan.id.trim());
+      }
+
       totalAmount += planPrice;
     }
 
@@ -174,6 +179,18 @@ serve(async (req: Request) => {
         JSON.stringify({
           error: "Invalid plan selections for one or more libraries",
           details: unresolvedLibraries,
+        }),
+        {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    if (library_ids.length > 1 && matchedPlanIds.size > 1) {
+      return new Response(
+        JSON.stringify({
+          error: "All libraries in a single registration must use the same subscription plan",
         }),
         {
           status: 400,

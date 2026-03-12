@@ -982,6 +982,14 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
     clearCredentialErrors('staff_password');
   };
 
+  const updateSelectedPlan = (libIdx, plan) => {
+    if (isMultiLibrary) {
+      setLibraries((prev) => prev.map((lib) => ({ ...lib, selectedPlan: plan })));
+      return;
+    }
+    updateLibField(libIdx, 'selectedPlan', plan);
+  };
+
   useEffect(() => {
     if (libraries.length <= 1 && staffAccountMode !== 'separate') {
       setStaffAccountMode('separate');
@@ -1169,43 +1177,49 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
     let valid = true;
     const ownerEmail = libraries[0]?.contact_email?.trim() || '';
 
-    libraries.forEach((lib, i) => {
-      const adminEmail = (lib.admin_email || ownerEmail || '').trim();
-      if (!adminEmail) {
-        e[`${i}_admin_email`] = 'Required';
+    const adminEmail = (libraries[0]?.admin_email || ownerEmail || '').trim();
+    if (!adminEmail) {
+      e['0_admin_email'] = 'Required';
+      valid = false;
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail)) {
+      e['0_admin_email'] = 'Invalid email';
+      valid = false;
+    }
+
+    if (!libraries[0]?.admin_password?.trim()) {
+      e['0_admin_password'] = 'Required';
+      valid = false;
+    } else if (libraries[0].admin_password.trim().length < 6) {
+      e['0_admin_password'] = 'Minimum 6 characters';
+      valid = false;
+    }
+
+    const validateStaffForLibrary = (lib, i) => {
+      if (!lib.staff_enabled) return;
+
+      const staffEmail = (lib.staff_email || '').trim();
+      if (!staffEmail) {
+        e[`${i}_staff_email`] = 'Required';
         valid = false;
-      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail)) {
-        e[`${i}_admin_email`] = 'Invalid email';
+      } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(staffEmail)) {
+        e[`${i}_staff_email`] = 'Invalid email';
         valid = false;
       }
 
-      if (!lib.admin_password?.trim()) {
-        e[`${i}_admin_password`] = 'Required';
+      if (!lib.staff_password?.trim()) {
+        e[`${i}_staff_password`] = 'Required';
         valid = false;
-      } else if (lib.admin_password.trim().length < 6) {
-        e[`${i}_admin_password`] = 'Minimum 6 characters';
+      } else if (lib.staff_password.trim().length < 6) {
+        e[`${i}_staff_password`] = 'Minimum 6 characters';
         valid = false;
       }
+    };
 
-      if (lib.staff_enabled) {
-        const staffEmail = (lib.staff_email || '').trim();
-        if (!staffEmail) {
-          e[`${i}_staff_email`] = 'Required';
-          valid = false;
-        } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(staffEmail)) {
-          e[`${i}_staff_email`] = 'Invalid email';
-          valid = false;
-        }
-
-        if (!lib.staff_password?.trim()) {
-          e[`${i}_staff_password`] = 'Required';
-          valid = false;
-        } else if (lib.staff_password.trim().length < 6) {
-          e[`${i}_staff_password`] = 'Minimum 6 characters';
-          valid = false;
-        }
-      }
-    });
+    if (isMultiLibrary && staffAccountMode === 'shared') {
+      validateStaffForLibrary(libraries[0], 0);
+    } else {
+      libraries.forEach((lib, i) => validateStaffForLibrary(lib, i));
+    }
 
     setErrors(e);
     if (!valid) toast.error('Please complete admin/staff credentials');
@@ -1214,11 +1228,21 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
 
   const validateStep9 = () => {
     let valid = true;
-    libraries.forEach((lib) => {
-      if (!lib.selectedPlan) valid = false;
-    });
+    if (isMultiLibrary) {
+      valid = Boolean(libraries[0]?.selectedPlan);
+    } else {
+      libraries.forEach((lib) => {
+        if (!lib.selectedPlan) valid = false;
+      });
+    }
 
-    if (!valid) toast.error('Please select a plan for every library to continue.');
+    if (!valid) {
+      toast.error(
+        isMultiLibrary
+          ? 'Please select one shared plan for all libraries.'
+          : 'Please select a plan for every library to continue.',
+      );
+    }
     return valid;
   };
 
@@ -1971,6 +1995,10 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
           if (mLockers > 0) locker_policies.push({ ...lib.maleLockerPolicy, gender: 'male', monthly_fee: parseFloat(lib.maleLockerPolicy.monthly_fee) || 0 });
           if (fLockers > 0) locker_policies.push({ ...lib.femaleLockerPolicy, gender: 'female', monthly_fee: parseFloat(lib.femaleLockerPolicy.monthly_fee) || 0 });
           
+          const effectiveSelectedPlan = isMultiLibrary
+            ? (libraries[0]?.selectedPlan || null)
+            : (lib.selectedPlan || null);
+
           return {
             name: lib.name.trim(),
             address: lib.address.trim(),
@@ -2025,8 +2053,10 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                   permissions: ['view_data', 'admission', 'collect_payment'],
                 }
               : null,
-            selected_plan_id: lib.selectedPlan?.id,
-            duration_days: lib.selectedPlan?.duration_days
+            selected_plan_id: effectiveSelectedPlan?.id,
+            duration_days: effectiveSelectedPlan?.duration_days,
+            selected_plan_name: effectiveSelectedPlan?.name || null,
+            selected_plan_label: effectiveSelectedPlan?.label || null,
           };
         }),
       };
@@ -2049,8 +2079,8 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
         planSelections[mappedLibraryId] = {
           plan_id: lib.selected_plan_id ?? null,
           duration_days: Number(lib.duration_days) || null,
-          name: lib.selectedPlan?.name || null,
-          label: lib.selectedPlan?.label || null,
+          name: lib.selected_plan_name || null,
+          label: lib.selected_plan_label || null,
         };
       });
 
@@ -2148,6 +2178,7 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
         ...createInitialLibraryForm(),
         admin_email: base.admin_email || '',
         admin_password: base.admin_password || '',
+        selectedPlan: base.selectedPlan || null,
       };
 
       if (staffAccountMode === 'shared') {
@@ -3387,14 +3418,59 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                 </div>
               )}
 
+              {isMultiLibrary && (
+                <div className="p-5 rounded-xl bg-white shadow-sm mb-6" style={{ border: '1px solid var(--color-border)' }}>
+                  <h3 className="font-bold text-lg pb-3 mb-4 flex items-center gap-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
+                    <span className="material-symbols-rounded text-amber-500">admin_panel_settings</span>
+                    Shared Admin Account (All Libraries)
+                  </h3>
+                  <div className="p-4 rounded-xl" style={{ background: 'var(--color-surface-dark)', border: '1px solid var(--color-border)' }}>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="form-group mb-0">
+                        <label className="form-label">Admin Email</label>
+                        <input
+                          type="email"
+                          className={`form-input ${errors['0_admin_email'] ? 'error' : ''}`}
+                          value={libraries[0]?.admin_email || libraries[0]?.contact_email || ''}
+                          onChange={(e) => updateAdminField(0, 'admin_email', e.target.value)}
+                          placeholder="admin@library.com"
+                        />
+                        {errors['0_admin_email'] && <div className="form-error">{errors['0_admin_email']}</div>}
+                        <div className="text-xs text-muted mt-1">Prefilled from owner contact email and applied to all libraries.</div>
+                      </div>
+                      <div className="form-group mb-0">
+                        <label className="form-label">Admin Password</label>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            className={`form-input ${errors['0_admin_password'] ? 'error' : ''}`}
+                            value={libraries[0]?.admin_password || ''}
+                            onChange={(e) => updateAdminField(0, 'admin_password', e.target.value)}
+                            placeholder="Minimum 6 characters"
+                          />
+                          <button
+                            type="button"
+                            className="btn btn-secondary btn-sm"
+                            onClick={() => updateAdminField(0, 'admin_password', generateTempPassword())}
+                          >
+                            Generate
+                          </button>
+                        </div>
+                        {errors['0_admin_password'] && <div className="form-error">{errors['0_admin_password']}</div>}
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted mt-3">
+                      This single owner/admin login will control all registered libraries in this submission.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               <div className="flex flex-col gap-6">
                 {libraries.map((lib, libIdx) => {
                   const ownerEmail = libraries[0]?.contact_email || '';
-                  const sharedAdminEmail = (libraries[0]?.admin_email || ownerEmail || '').trim();
-                  const sharedAdminPassword = libraries[0]?.admin_password || '';
-                  const adminEmailValue = isMultiLibrary ? sharedAdminEmail : (lib.admin_email || ownerEmail);
-                  const adminPasswordValue = isMultiLibrary ? sharedAdminPassword : lib.admin_password;
-                  const lockAdminForThisCard = isMultiLibrary && libIdx > 0;
+                  const adminEmailValue = lib.admin_email || ownerEmail;
+                  const adminPasswordValue = lib.admin_password;
                   const isSharedStaffMode = isMultiLibrary && staffAccountMode === 'shared';
                   const staffEnabledValue = isSharedStaffMode
                     ? Boolean(libraries[0]?.staff_enabled)
@@ -3413,53 +3489,54 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                         {lib.name || `Library ${libIdx + 1}`}
                       </h3>
 
-                      <div className="p-4 rounded-xl mb-4" style={{ background: 'var(--color-surface-dark)', border: '1px solid var(--color-border)' }}>
-                        <h4 className="font-semibold text-navy mb-3">Library Admin Account</h4>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          <div className="form-group mb-0">
-                            <label className="form-label">Admin Email</label>
-                            <input
-                              type="email"
-                              className={`form-input ${errors[`${libIdx}_admin_email`] ? 'error' : ''}`}
-                              value={adminEmailValue}
-                              onChange={(e) => updateAdminField(libIdx, 'admin_email', e.target.value)}
-                              placeholder="admin@library.com"
-                              disabled={lockAdminForThisCard}
-                            />
-                            {errors[`${libIdx}_admin_email`] && <div className="form-error">{errors[`${libIdx}_admin_email`]}</div>}
-                            <div className="text-xs text-muted mt-1">
-                              {lockAdminForThisCard
-                                ? 'This library uses the same owner login as the first library.'
-                                : 'Prefilled from owner contact email.'}
-                            </div>
-                          </div>
-                          <div className="form-group mb-0">
-                            <label className="form-label">Admin Password</label>
-                            <div className="flex items-center gap-2">
+                      {!isMultiLibrary && (
+                        <div className="p-4 rounded-xl mb-4" style={{ background: 'var(--color-surface-dark)', border: '1px solid var(--color-border)' }}>
+                          <h4 className="font-semibold text-navy mb-3">Library Admin Account</h4>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="form-group mb-0">
+                              <label className="form-label">Admin Email</label>
                               <input
-                                type="text"
-                                className={`form-input ${errors[`${libIdx}_admin_password`] ? 'error' : ''}`}
-                                value={adminPasswordValue}
-                                onChange={(e) => updateAdminField(libIdx, 'admin_password', e.target.value)}
-                                placeholder="Minimum 6 characters"
-                                disabled={lockAdminForThisCard}
+                                type="email"
+                                className={`form-input ${errors[`${libIdx}_admin_email`] ? 'error' : ''}`}
+                                value={adminEmailValue}
+                                onChange={(e) => updateAdminField(libIdx, 'admin_email', e.target.value)}
+                                placeholder="admin@library.com"
                               />
-                              <button
-                                type="button"
-                                className="btn btn-secondary btn-sm"
-                                onClick={() => updateAdminField(libIdx, 'admin_password', generateTempPassword())}
-                                disabled={lockAdminForThisCard}
-                              >
-                                Generate
-                              </button>
+                              {errors[`${libIdx}_admin_email`] && <div className="form-error">{errors[`${libIdx}_admin_email`]}</div>}
+                              <div className="text-xs text-muted mt-1">Prefilled from owner contact email.</div>
                             </div>
-                            {errors[`${libIdx}_admin_password`] && <div className="form-error">{errors[`${libIdx}_admin_password`]}</div>}
+                            <div className="form-group mb-0">
+                              <label className="form-label">Admin Password</label>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="text"
+                                  className={`form-input ${errors[`${libIdx}_admin_password`] ? 'error' : ''}`}
+                                  value={adminPasswordValue}
+                                  onChange={(e) => updateAdminField(libIdx, 'admin_password', e.target.value)}
+                                  placeholder="Minimum 6 characters"
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary btn-sm"
+                                  onClick={() => updateAdminField(libIdx, 'admin_password', generateTempPassword())}
+                                >
+                                  Generate
+                                </button>
+                              </div>
+                              {errors[`${libIdx}_admin_password`] && <div className="form-error">{errors[`${libIdx}_admin_password`]}</div>}
+                            </div>
                           </div>
+                          <p className="text-xs text-muted mt-3">
+                            Admin can fully manage this library with complete CRUD access.
+                          </p>
                         </div>
-                        <p className="text-xs text-muted mt-3">
-                          Admin can fully manage this library with complete CRUD access.
-                        </p>
-                      </div>
+                      )}
+
+                      {isMultiLibrary && (
+                        <div className="text-xs text-muted mb-4">
+                          Admin login is shared from the top section.
+                        </div>
+                      )}
 
                       <div className="p-4 rounded-xl" style={{ background: 'var(--color-surface-dark)', border: '1px solid var(--color-border)' }}>
                         <label className="checkbox-label mb-3">
@@ -3536,15 +3613,26 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                 Select Subscription Plan
               </h2>
               <p className="text-sm mb-6 text-muted">
-                Choose a plan for each of your libraries to activate them on LibraryOS.
+                {isMultiLibrary
+                  ? `Choose one shared plan for all ${libraries.length} libraries. Amount is calculated securely on backend as plan price x library count.`
+                  : 'Choose a plan for your library to activate it on LibraryOS.'}
               </p>
 
+              {isMultiLibrary && (
+                <div className="mb-6 p-4 rounded-xl" style={{ background: 'var(--color-surface-dark)', border: '1px solid var(--color-border)' }}>
+                  <div className="text-xs text-muted uppercase tracking-wide mb-2">Shared Plan Scope</div>
+                  <div className="text-sm text-navy font-medium">
+                    {libraries.map((lib, idx) => lib.name || `Library ${idx + 1}`).join(' + ')}
+                  </div>
+                </div>
+              )}
+
               <div className="flex flex-col gap-6">
-                {libraries.map((lib, libIdx) => (
-                  <div key={libIdx} className="p-5 rounded-xl bg-white shadow-sm" style={{ border: '1px solid var(--color-border)' }}>
+                {isMultiLibrary ? (
+                  <div className="p-5 rounded-xl bg-white shadow-sm" style={{ border: '1px solid var(--color-border)' }}>
                     <h3 className="font-bold text-lg pb-3 mb-4 flex items-center gap-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
                       <span className="material-symbols-rounded text-amber-500">store</span>
-                      {lib.name || `Library ${libIdx + 1}`}
+                      Shared Plan (Applies To All Libraries)
                     </h3>
 
                     {isFetchingPlans ? (
@@ -3553,7 +3641,7 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {pricingPlans.map((plan, planIdx) => {
                           const planIdentity = getPlanIdentity(plan);
-                          const selectedPlanIdentity = getPlanIdentity(lib.selectedPlan);
+                          const selectedPlanIdentity = getPlanIdentity(libraries[0]?.selectedPlan);
                           const isSelected = selectedPlanIdentity !== '' && selectedPlanIdentity === planIdentity;
                           const planKey =
                             planIdentity || `plan_${planIdx}_${plan.name || plan.label || plan.duration_days || 'x'}`;
@@ -3564,18 +3652,18 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                             >
                               <input
                                 type="radio"
-                                name={`plan_${libIdx}`}
+                                name="plan_shared"
                                 value={planKey}
                                 className="absolute right-4 top-4 h-5 w-5 text-amber-500 focus:ring-amber-500"
                                 checked={isSelected}
-                                onChange={() => updateLibField(libIdx, 'selectedPlan', plan)}
+                                onChange={() => updateSelectedPlan(0, plan)}
                               />
                               <div className="mb-3">
                                 {plan.name === "3_month" && <span className="inline-block px-2 py-1 bg-blue-100 text-blue-700 text-xs font-bold rounded mb-2 uppercase">Most Popular</span>}
                                 <h4 className="text-xl font-bold text-navy mb-1">{plan.label}</h4>
                                 <div className="flex items-baseline gap-1">
                                   <span className="text-2xl font-black text-navy">₹{plan.base_price}</span>
-                                  <span className="text-sm text-slate-500">/{plan.duration_days} days</span>
+                                  <span className="text-sm text-slate-500">/{plan.duration_days} days per library</span>
                                 </div>
                               </div>
                               <ul className="space-y-2 text-sm text-slate-600">
@@ -3608,7 +3696,77 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                       </div>
                     )}
                   </div>
-                ))}
+                ) : (
+                  libraries.map((lib, libIdx) => (
+                    <div key={libIdx} className="p-5 rounded-xl bg-white shadow-sm" style={{ border: '1px solid var(--color-border)' }}>
+                      <h3 className="font-bold text-lg pb-3 mb-4 flex items-center gap-2" style={{ borderBottom: '1px solid var(--color-border)' }}>
+                        <span className="material-symbols-rounded text-amber-500">store</span>
+                        {lib.name || `Library ${libIdx + 1}`}
+                      </h3>
+
+                      {isFetchingPlans ? (
+                        <div className="p-8 text-center text-muted"><span className="loading-spinner"></span> Loading plans...</div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {pricingPlans.map((plan, planIdx) => {
+                            const planIdentity = getPlanIdentity(plan);
+                            const selectedPlanIdentity = getPlanIdentity(lib.selectedPlan);
+                            const isSelected = selectedPlanIdentity !== '' && selectedPlanIdentity === planIdentity;
+                            const planKey =
+                              planIdentity || `plan_${planIdx}_${plan.name || plan.label || plan.duration_days || 'x'}`;
+                            return (
+                              <label
+                                key={planKey}
+                                className={`relative p-5 rounded-xl cursor-pointer transition-all border-2 ${isSelected ? 'border-amber-500 bg-amber-50/30' : 'border-slate-200 hover:border-amber-300'}`}
+                              >
+                                <input
+                                  type="radio"
+                                  name={`plan_${libIdx}`}
+                                  value={planKey}
+                                  className="absolute right-4 top-4 h-5 w-5 text-amber-500 focus:ring-amber-500"
+                                  checked={isSelected}
+                                  onChange={() => updateSelectedPlan(libIdx, plan)}
+                                />
+                                <div className="mb-3">
+                                  {plan.name === "3_month" && <span className="inline-block px-2 py-1 bg-blue-100 text-blue-700 text-xs font-bold rounded mb-2 uppercase">Most Popular</span>}
+                                  <h4 className="text-xl font-bold text-navy mb-1">{plan.label}</h4>
+                                  <div className="flex items-baseline gap-1">
+                                    <span className="text-2xl font-black text-navy">₹{plan.base_price}</span>
+                                    <span className="text-sm text-slate-500">/{plan.duration_days} days</span>
+                                  </div>
+                                </div>
+                                <ul className="space-y-2 text-sm text-slate-600">
+                                  <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-green-500">check_circle</span> Unlimited Shifts & Combos</li>
+                                  <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-green-500">check_circle</span> Locker Management</li>
+                                  <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-green-500">check_circle</span> Income & Expense Tracking</li>
+                                </ul>
+                              </label>
+                            );
+                          })}
+
+                          <label className={`relative p-5 rounded-xl cursor-not-allowed border-2 border-slate-200 bg-slate-50 opacity-70`}>
+                            <div className="absolute right-4 top-4">
+                              <span className="material-symbols-rounded text-slate-400">lock</span>
+                            </div>
+                            <div className="mb-3">
+                              <span className="inline-block px-2 py-1 bg-slate-200 text-slate-600 text-xs font-bold rounded mb-2">COMING SOON</span>
+                              <h4 className="text-xl font-bold text-slate-500 mb-1">Premium + AI CCTV</h4>
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-2xl font-black text-slate-400">TBD</span>
+                              </div>
+                            </div>
+                            <ul className="space-y-2 text-sm text-slate-500">
+                              <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-slate-400">check_circle</span> All Standard Features</li>
+                              <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-slate-400">check_circle</span> Admin App Access</li>
+                              <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-slate-400">check_circle</span> Student App with QR Check-in</li>
+                              <li className="flex gap-2"><span className="material-symbols-rounded icon-sm text-slate-400">check_circle</span> AI CCTV Integration</li>
+                            </ul>
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
               </div>
             </div>
           )}
@@ -3650,20 +3808,47 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {libraries.map((lib, i) => {
-                        const plan = lib.selectedPlan;
-                        return (
-                          <tr key={i}>
-                            <td className="p-4 font-medium text-navy">
-                              {lib.name || `Library ${i+1}`} 
-                              <span className="text-xs text-slate-400 block font-normal mt-1">{lib.city}{lib.state ? `, ${lib.state}` : ''}</span>
-                            </td>
-                            <td className="p-4 text-slate-600">{plan ? plan.label : <span className="text-red-500 font-bold">Missing</span>}</td>
-                            <td className="p-4 text-slate-600">{plan ? `${plan.duration_days} days` : '-'}</td>
-                            <td className="p-4 text-navy font-bold text-right">{plan ? `₹${plan.base_price}` : '₹0'}</td>
-                          </tr>
-                        );
-                      })}
+                      {isMultiLibrary ? (
+                        (() => {
+                          const sharedPlan = libraries[0]?.selectedPlan || null;
+                          const perLibraryPrice = Number(sharedPlan?.base_price || 0);
+                          const sharedTotal = perLibraryPrice * libraries.length;
+                          return (
+                            <tr>
+                              <td className="p-4 font-medium text-navy">
+                                {libraries.length} Libraries (Shared Plan)
+                                <span className="text-xs text-slate-400 block font-normal mt-1">
+                                  {libraries.map((lib, i) => lib.name || `Library ${i + 1}`).join(' + ')}
+                                </span>
+                              </td>
+                              <td className="p-4 text-slate-600">
+                                {sharedPlan ? sharedPlan.label : <span className="text-red-500 font-bold">Missing</span>}
+                              </td>
+                              <td className="p-4 text-slate-600">
+                                {sharedPlan ? `${sharedPlan.duration_days} days` : '-'}
+                              </td>
+                              <td className="p-4 text-navy font-bold text-right">
+                                {sharedPlan ? `₹${perLibraryPrice} x ${libraries.length} = ₹${sharedTotal}` : '₹0'}
+                              </td>
+                            </tr>
+                          );
+                        })()
+                      ) : (
+                        libraries.map((lib, i) => {
+                          const plan = lib.selectedPlan;
+                          return (
+                            <tr key={i}>
+                              <td className="p-4 font-medium text-navy">
+                                {lib.name || `Library ${i+1}`} 
+                                <span className="text-xs text-slate-400 block font-normal mt-1">{lib.city}{lib.state ? `, ${lib.state}` : ''}</span>
+                              </td>
+                              <td className="p-4 text-slate-600">{plan ? plan.label : <span className="text-red-500 font-bold">Missing</span>}</td>
+                              <td className="p-4 text-slate-600">{plan ? `${plan.duration_days} days` : '-'}</td>
+                              <td className="p-4 text-navy font-bold text-right">{plan ? `₹${plan.base_price}` : '₹0'}</td>
+                            </tr>
+                          );
+                        })
+                      )}
                     </tbody>
                     <tfoot className="bg-slate-50/50">
                       <tr>
