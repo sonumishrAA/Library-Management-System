@@ -46,7 +46,7 @@ const compactPlanPayload = (feePlans = {}) =>
   );
 
 const createEmptyShiftForm = () => ({
-  label: '',
+  label: 'Morning',
   start_time: '',
   end_time: '',
   fee_plans: createEmptyFeePlans(),
