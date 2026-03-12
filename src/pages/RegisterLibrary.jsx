@@ -959,9 +959,8 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
 
   const addShift = (libIdx) => {
     const sForm = getShiftForm(libIdx);
-    if (!sForm.label.trim()) {
-      toast.error('Please enter a shift label');
-      return;
+    if (!sForm.label || !sForm.label.trim()) {
+      sForm.label = 'Morning'; // Fallback to default if somehow empty in state
     }
     if (!sForm.start_time || !sForm.end_time) {
       toast.error('Please select start and end times');
