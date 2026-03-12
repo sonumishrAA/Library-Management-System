@@ -2103,11 +2103,9 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                               onChange={(e) => updateShiftForm(libIdx, (p) => ({ ...p, label: e.target.value }))}
                             >
                               <option value="Morning">Morning</option>
-                              <option value="Noon">Noon</option>
                               <option value="Afternoon">Afternoon</option>
                               <option value="Evening">Evening</option>
                               <option value="Night">Night</option>
-                              <option value="Full Day">Full Day</option>
                             </select>
                           </div>
 
