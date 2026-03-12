@@ -45,11 +45,84 @@ const compactPlanPayload = (feePlans = {}) =>
       .map(([month, value]) => [month, Number(value)]),
   );
 
+const createDefaultFeePlans = () => {
+  const plans = createEmptyFeePlans();
+  plans['1'] = '500';
+  plans['3'] = '1500';
+  return plans;
+};
+
+const calcDurationHours = (start, end) => {
+  if (!start || !end) return 0;
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  let diff = (eh * 60 + em) - (sh * 60 + sm);
+  if (diff <= 0) diff += 24 * 60;
+  return Math.round((diff / 60) * 10) / 10;
+};
+
+const DEFAULT_SHIFT_BLUEPRINTS = [
+  { label: 'Morning', start_time: '07:00', end_time: '12:00' },
+  { label: 'Afternoon', start_time: '12:00', end_time: '17:00' },
+  { label: 'Evening', start_time: '17:00', end_time: '22:00' },
+  { label: 'Night', start_time: '22:00', end_time: '07:00' },
+];
+
+const createDefaultShifts = () =>
+  DEFAULT_SHIFT_BLUEPRINTS.map((shift, idx) => ({
+    id: `default-shift-${idx + 1}`,
+    label: shift.label,
+    start_time: shift.start_time,
+    end_time: shift.end_time,
+    duration_hours: calcDurationHours(shift.start_time, shift.end_time),
+    monthly_fee: 500,
+    fee_plans: createDefaultFeePlans(),
+    is_base: true,
+  }));
+
+const createDefaultCombinedPricing = (shifts) => {
+  const combos = [];
+  let comboIdx = 1;
+
+  for (let len = 2; len <= shifts.length; len += 1) {
+    for (let i = 0; i <= shifts.length - len; i += 1) {
+      const slice = shifts.slice(i, i + len);
+      const isConsecutive = slice.every(
+        (shift, index) => index === 0 || slice[index - 1].end_time === shift.start_time,
+      );
+      if (!isConsecutive) continue;
+
+      const month1 = slice.reduce((sum, shift) => sum + Number(shift.fee_plans?.['1'] || 0), 0);
+      const month3 = slice.reduce((sum, shift) => sum + Number(shift.fee_plans?.['3'] || 0), 0);
+      const defaultFeePlans = createEmptyFeePlans();
+      defaultFeePlans['1'] = String(month1);
+      defaultFeePlans['3'] = String(month3);
+
+      combos.push({
+        id: `default-combo-${comboIdx}`,
+        shift_ids: slice.map((shift) => shift.id),
+        label: slice.map((shift) => shift.label).join(' + '),
+        default_fee: month1,
+        default_fee_plans: defaultFeePlans,
+        custom_fee: String(month1),
+        custom_fee_plans: { ...defaultFeePlans },
+        is_offered: true,
+        start_time: slice[0].start_time,
+        end_time: slice[slice.length - 1].end_time,
+        duration_hours: slice.reduce((sum, shift) => sum + Number(shift.duration_hours || 0), 0),
+      });
+      comboIdx += 1;
+    }
+  }
+
+  return combos;
+};
+
 const createEmptyShiftForm = () => ({
   label: 'Morning',
-  start_time: '',
-  end_time: '',
-  fee_plans: createEmptyFeePlans(),
+  start_time: '07:00',
+  end_time: '12:00',
+  fee_plans: createDefaultFeePlans(),
 });
 
 const getShiftPlanAmount = (shift, durationMonths) => {
@@ -521,8 +594,8 @@ const initialForm = {
   female_seats: '', // Replaces total_girls_seats
   male_lockers: '', // Replaces total_lockers
   female_lockers: '',
-  shifts: [], // Base shifts only
-  combinedPricing: [], // Toggled ON combos
+  shifts: [], // Base shifts
+  combinedPricing: [], // Auto-generated combos
   maleLockerPolicy: {
     eligible_shift_type: 'any',
     monthly_fee: '',
@@ -544,15 +617,19 @@ const initialForm = {
   selectedPlan: null,
 };
 
-const createInitialLibraryForm = () => ({
-  ...initialForm,
-  shifts: [],
-  combinedPricing: [],
-  maleLockerPolicy: { ...initialForm.maleLockerPolicy },
-  femaleLockerPolicy: { ...initialForm.femaleLockerPolicy },
-  imported_students: [],
-  selectedPlan: null,
-});
+const createInitialLibraryForm = () => {
+  // Pre-fill default shift schedule and combo pricing; user can edit during registration.
+  const shifts = createDefaultShifts();
+  return {
+    ...initialForm,
+    shifts,
+    combinedPricing: createDefaultCombinedPricing(shifts),
+    maleLockerPolicy: { ...initialForm.maleLockerPolicy },
+    femaleLockerPolicy: { ...initialForm.femaleLockerPolicy },
+    imported_students: [],
+    selectedPlan: null,
+  };
+};
 
 export default function RegisterLibrary() {
   const navigate = useNavigate();
@@ -1135,6 +1212,19 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
             ) {
               existingCustomPlans['1'] = String(existing.custom_fee);
             }
+            if (
+              existing &&
+              (existingCustomPlans['3'] === '' || existingCustomPlans['3'] === null || existingCustomPlans['3'] === undefined)
+            ) {
+              const defaultMonthThree = defaultFeePlans['3'];
+              if (defaultMonthThree !== '' && defaultMonthThree !== null && defaultMonthThree !== undefined) {
+                existingCustomPlans['3'] = String(defaultMonthThree);
+              }
+            }
+
+            const seededCustomPlans = createEmptyFeePlans();
+            seededCustomPlans['1'] = defaultFeePlans['1'] === '' ? '' : String(defaultFeePlans['1']);
+            seededCustomPlans['3'] = defaultFeePlans['3'] === '' ? '' : String(defaultFeePlans['3']);
             
             newCombos.push({
               id: existing ? existing.id : `combo-${Date.now()}-${Math.random().toString(36).substring(2,9)}`,
@@ -1142,9 +1232,9 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
               label: label,
               default_fee: defaultFee,
               default_fee_plans: defaultFeePlans,
-              custom_fee: existing ? existing.custom_fee : '',
-              custom_fee_plans: existing ? existingCustomPlans : createEmptyFeePlans(),
-              is_offered: existing ? existing.is_offered : false,
+              custom_fee: existing ? existing.custom_fee : seededCustomPlans['1'],
+              custom_fee_plans: existing ? existingCustomPlans : seededCustomPlans,
+              is_offered: existing ? existing.is_offered : true,
               start_time: slice[0].start_time,
               end_time: slice[slice.length - 1].end_time,
               duration_hours: slice.reduce((sum, s) => sum + s.duration_hours, 0)
@@ -1290,10 +1380,10 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
         }))),
     ];
 
-    const fallbackShifts = [
-      { label: 'Morning', duration_hours: 5 },
-      { label: 'After Noon', duration_hours: 5 },
-    ];
+    const fallbackShifts = DEFAULT_SHIFT_BLUEPRINTS.map((shift) => ({
+      label: shift.label,
+      duration_hours: calcDurationHours(shift.start_time, shift.end_time),
+    }));
     const templateShifts = shiftOptions.length > 0 ? shiftOptions : fallbackShifts;
 
     const getLockerSample = (gender, shiftMeta) => {
