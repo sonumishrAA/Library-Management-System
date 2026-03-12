@@ -1556,6 +1556,8 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
     
     setIsSubmitting(true);
     setSubmitError('');
+    setIsVerifying(false);
+    let waitingForCheckoutResult = false;
     
     try {
       // Placeholder structure for processing before payment API Integration (Phase 3)
@@ -1683,6 +1685,7 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
             const verifyRes = await verifyPayment(verifyPayload);
 
             toast.success(`${libraries.length} ${libraries.length === 1 ? 'library' : 'libraries'} registered successfully!`);
+            setIsSubmitting(false);
             
             navigate('/register/success', { 
               state: { credentials: verifyRes.credentials }
@@ -1708,6 +1711,7 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
             setSubmitError('Payment cancelled by user');
             toast.error('Payment cancelled');
             setIsSubmitting(false);
+            setIsVerifying(false);
           }
         }
       };
@@ -1718,7 +1722,9 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
         setSubmitError(response.error.description || 'Payment processing failed');
         toast.error('Payment failed: ' + (response.error.description || 'Try again'));
         setIsSubmitting(false);
+        setIsVerifying(false);
       });
+      waitingForCheckoutResult = true;
       rzp.open();
       
       // Do NOT set isSubmitting(false) here, we wait for Razorpay UI callbacks
@@ -1729,7 +1735,9 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
       setSubmitError(err.message || 'Something went wrong');
       toast.error(err.message || 'Registration failed');
     } finally {
-      setIsSubmitting(false);
+      if (!waitingForCheckoutResult) {
+        setIsSubmitting(false);
+      }
     }
   };
 
@@ -1774,12 +1782,14 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
   return (
     <div className="register-page">
       {isVerifying && (
-        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-white/90 backdrop-blur-sm">
-          <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-amber-500 mb-4"></div>
-          <h2 className="text-2xl font-bold text-navy-900 mb-2">Processing Payment...</h2>
-          <p className="text-slate-600 text-center max-w-md">
+        <div className="payment-verifying-overlay" role="status" aria-live="polite">
+          <div className="payment-verifying-card">
+            <span className="payment-verifying-spinner" />
+            <h2>Processing payment...</h2>
+            <p>
             Please wait while we set up your library and generate your credentials. Do not refresh or close this page.
-          </p>
+            </p>
+          </div>
         </div>
       )}
       <div className="register-topbar">

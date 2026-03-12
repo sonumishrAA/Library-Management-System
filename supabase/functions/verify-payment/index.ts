@@ -70,6 +70,117 @@ serve(async (req: Request) => {
       baseDate.setMonth(baseDate.getMonth() + safeMonths);
       return baseDate.toISOString().split("T")[0];
     };
+    const addImportedStudent = async (studentPayload: any) => {
+      const {
+        library_id,
+        full_name,
+        father_name,
+        phone,
+        gender,
+        address,
+        shift_ids,
+        seat_number,
+        assign_locker,
+        locker_number,
+        plan_duration,
+        amount_paid,
+        payment_mode,
+        payment_status,
+        start_date,
+        end_date,
+      } = studentPayload;
+
+      if (!seat_number || String(seat_number).trim() === "") {
+        throw new Error("Seat number is mandatory");
+      }
+
+      const shiftsToAssign = (Array.isArray(shift_ids) ? shift_ids : [shift_ids]).filter(Boolean);
+      if (shiftsToAssign.length === 0) {
+        throw new Error("At least one shift is required");
+      }
+
+      const { data: student, error: studentError } = await supabase
+        .from("students")
+        .insert({
+          library_id,
+          full_name,
+          father_name: father_name || "",
+          phone,
+          gender,
+          address: address || "",
+          status: "active",
+        })
+        .select("id")
+        .single();
+
+      if (studentError) {
+        throw new Error(`Failed to insert student: ${studentError.message}`);
+      }
+
+      const student_id = student.id;
+      const numericAmount = Number(amount_paid || 0);
+      const normalizedPaymentStatus = String(payment_status || "paid").toLowerCase();
+
+      const membershipRows = shiftsToAssign.map((shiftId: string) => ({
+        student_id,
+        library_id,
+        shift_id: shiftId,
+        seat_number,
+        locker_number: assign_locker && locker_number ? locker_number : "",
+        start_date,
+        end_date,
+        amount_paid: Number.isFinite(numericAmount) ? numericAmount : 0,
+        payment_mode: payment_mode || "cash",
+        payment_status: normalizedPaymentStatus,
+        plan_duration: String(plan_duration || "1"),
+        status: "active",
+      }));
+
+      const { data: memberships, error: membershipError } = await supabase
+        .from("memberships")
+        .insert(membershipRows)
+        .select("id, shift_id");
+
+      if (membershipError) {
+        await supabase.from("students").delete().eq("id", student_id);
+        throw new Error(`Failed to create membership: ${membershipError.message}`);
+      }
+
+      if (seat_number) {
+        const occupancyRows = (memberships || []).map((membership: any) => ({
+          library_id,
+          seat_number,
+          membership_id: membership.id,
+          shift_id: membership.shift_id,
+          gender,
+          start_date,
+          end_date,
+        }));
+
+        if (occupancyRows.length > 0) {
+          const { error: occupancyError } = await supabase
+            .from("seat_occupancy")
+            .insert(occupancyRows);
+
+          if (occupancyError) {
+            console.error("Failed to insert seat occupancy:", occupancyError);
+          }
+        }
+      }
+
+      if (assign_locker && locker_number) {
+        const primaryMembershipId = memberships?.[0]?.id;
+        const { error: lockerUpdateError } = await supabase
+          .from("lockers")
+          .update({ is_occupied: true, membership_id: primaryMembershipId || null })
+          .eq("library_id", library_id)
+          .eq("locker_number", locker_number);
+
+        if (lockerUpdateError) {
+          console.error("Locker update error:", lockerUpdateError);
+        }
+      }
+    };
 
     // Process each library to activate it and generate credentials
     for (const [libIndex, libraryId] of library_ids.entries()) {
@@ -197,9 +308,11 @@ serve(async (req: Request) => {
         .eq("library_id", libraryId);
 
       const labelToDbId = new Map<string, string>();
+      const dbShiftIdSet = new Set<string>();
       if (dbShifts) {
         dbShifts.forEach((s: any) => {
           labelToDbId.set(s.label, s.id);
+          dbShiftIdSet.add(s.id);
         });
       }
 
@@ -218,13 +331,19 @@ serve(async (req: Request) => {
                : [];
 
            // Map local frontend shift IDs to DB shift IDs
-           const shiftIds = rawShiftIds.map((localId: string) => {
+           const shiftIds = rawShiftIds
+             .map((localId: string) => {
+             if (!localId) return null;
              const label = localIdToLabel.get(localId);
              if (label && labelToDbId.has(label)) {
                return labelToDbId.get(label)!;
              }
-             return localId; // Fallback to raw ID
-           });
+             if (dbShiftIdSet.has(localId)) {
+               return localId;
+             }
+             return null;
+           })
+             .filter(Boolean) as string[];
 
            if (shiftIds.length === 0) continue;
 
@@ -247,23 +366,10 @@ serve(async (req: Request) => {
            };
 
            try {
-             const res = await fetch(`${supabaseUrl}/functions/v1/add-student`, {
-               method: 'POST',
-               headers: {
-                 'Content-Type': 'application/json',
-                 'Authorization': `Bearer ${serviceRoleKey}`,
-               },
-               body: JSON.stringify(studentPayload)
-             });
-             
-             if (!res.ok) {
-               const errorText = await res.text();
-               console.error(`Failed to add student for ${libraryId}:`, errorText);
-               throw new Error(`Add student failed: ${errorText}`);
-             }
+             await addImportedStudent(studentPayload);
            } catch (e) {
-             console.error(`Error invoking add-student for ${libraryId}:`, e);
-             throw e; // Fail the payment verification so the admin knows students weren't imported
+             console.error(`Failed to add imported student for ${libraryId}:`, e);
+             throw e;
            }
         }
       }
