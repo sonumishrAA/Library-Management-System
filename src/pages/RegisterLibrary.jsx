@@ -3460,7 +3460,7 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                       </div>
                     </div>
                     <p className="text-xs text-muted mt-3">
-                      This single owner/admin login will control all registered libraries in this submission.
+                      Use one admin form for all libraries. System will keep credentials conflict-free per library.
                     </p>
                   </div>
                 </div>

@@ -59,6 +59,7 @@ serve(async (req: Request) => {
 
     const supabase = createClient(supabaseUrl, serviceRoleKey);
     const credentials = [];
+    const reservedLoginIds = new Set<string>();
 
     const getTodayISO = () => new Date().toISOString().split("T")[0];
     const addMonthsISO = (dateValue: string, monthsValue: number) => {
@@ -182,13 +183,54 @@ serve(async (req: Request) => {
       }
     };
 
+    const buildLoginIdVariant = (baseLoginId: string, attempt: number) => {
+      const base = String(baseLoginId || "").trim();
+      if (!base) return generateLoginId();
+      if (attempt === 0) return base;
+
+      if (base.includes("@")) {
+        const [localPart, domainPart] = base.split("@");
+        const safeLocal = localPart || "owner";
+        const safeDomain = domainPart || "libraryos.in";
+        return `${safeLocal}+lib${attempt}@${safeDomain}`;
+      }
+
+      return `${base}_lib${attempt}`;
+    };
+
+    const resolveUniqueLoginId = async (baseLoginId: string, currentLibraryId: string) => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const candidate = buildLoginIdVariant(baseLoginId, attempt);
+        if (!candidate || reservedLoginIds.has(candidate)) continue;
+
+        const { data, error } = await supabase
+          .from("libraries")
+          .select("id")
+          .eq("login_id", candidate)
+          .neq("id", currentLibraryId)
+          .limit(1);
+
+        if (error) {
+          throw new Error(`Failed to verify login ID uniqueness: ${error.message}`);
+        }
+
+        if (!data || data.length === 0) {
+          reservedLoginIds.add(candidate);
+          return candidate;
+        }
+      }
+
+      throw new Error("Unable to generate unique login ID for library activation");
+    };
+
     // Process each library to activate it and generate credentials
     for (const [libIndex, libraryId] of library_ids.entries()) {
       const matchingLibPayload = (body.libraries_payload || [])[libIndex] || null;
       const requestedAdminEmail = String(matchingLibPayload?.admin_account?.email || "").trim();
       const requestedAdminPassword = String(matchingLibPayload?.admin_account?.password || "").trim();
 
-      const login_id = requestedAdminEmail || generateLoginId();
+      const requestedBaseLoginId = requestedAdminEmail || generateLoginId();
+      const login_id = await resolveUniqueLoginId(requestedBaseLoginId, libraryId);
       const plain_password = requestedAdminPassword || generatePassword();
       const password_hash = await bcrypt.hash(plain_password, 12);
 
