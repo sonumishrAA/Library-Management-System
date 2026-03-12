@@ -81,26 +81,70 @@ serve(async (req: Request) => {
       const plain_password = requestedAdminPassword || generatePassword();
       const password_hash = await bcrypt.hash(plain_password, 12);
 
-      const { error: updateError } = await supabase
-        .from("libraries")
-        .update({
-          status: "active",
-          login_id,
-          password_hash,
-        })
-        .eq("id", libraryId);
+      // Staff Account logic
+      const requestedStaffEmail = String(matchingLibPayload?.staff_account?.email || "").trim();
+      const requestedStaffPassword = String(matchingLibPayload?.staff_account?.password || "").trim();
+      let staff_email = null;
+      let staff_password_hash = null;
+      let plain_staff_password = null;
+
+      if (matchingLibPayload?.staff_account) {
+        staff_email = requestedStaffEmail || `staff_${generateLoginId()}`;
+        plain_staff_password = requestedStaffPassword || generatePassword();
+        staff_password_hash = await bcrypt.hash(plain_staff_password, 12);
+      }
+
+      // We add staff_email and staff_password_hash to the update payload
+      // The user must add these columns to their db schema
+      const updatePayload: any = {
+        status: "active",
+        login_id,
+        password_hash,
+      };
+
+      let updateError = null;
+
+      if (staff_email) {
+        updatePayload.staff_email = staff_email;
+        updatePayload.staff_password_hash = staff_password_hash;
+        
+        const res = await supabase.from("libraries").update(updatePayload).eq("id", libraryId);
+        updateError = res.error;
+
+        // Fallback if the user hasn't added the staff columns to their database yet
+        if (updateError && String(updateError.message).includes("staff_email")) {
+          console.warn("Fallback: staff_email column missing in libraries table. Activating without staff credentials.");
+          delete updatePayload.staff_email;
+          delete updatePayload.staff_password_hash;
+          staff_email = null; // Prevent it from being added to the returned credentials array
+          plain_staff_password = null;
+          
+          const fallbackRes = await supabase.from("libraries").update(updatePayload).eq("id", libraryId);
+          updateError = fallbackRes.error;
+        }
+      } else {
+        const res = await supabase.from("libraries").update(updatePayload).eq("id", libraryId);
+        updateError = res.error;
+      }
 
       if (updateError) {
         console.error(`Failed to activate library ${libraryId}:`, updateError);
-        continue;
+        throw new Error(`Database error activating library: ${updateError.message}`);
       }
 
-      credentials.push({
+      const credsObj: any = {
         library_id: libraryId,
         name: matchingLibPayload?.name || `Library ${libIndex + 1}`,
         login_id,
         plain_password,
-      });
+      };
+
+      if (staff_email) {
+        credsObj.staff_email = staff_email;
+        credsObj.plain_staff_password = plain_staff_password;
+      }
+
+      credentials.push(credsObj);
 
       // Call init-seats for the newly activated library
       try {
