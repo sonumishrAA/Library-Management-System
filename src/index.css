@@ -5506,6 +5506,34 @@ body.admin-auth-body {
 .students-list {
   display: grid;
   gap: 0.9rem;
+  max-height: clamp(24rem, 62vh, 44rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  padding: 0.35rem 0.35rem 0.35rem 0.2rem;
+  border: 1px solid var(--color-border);
+  border-radius: 1rem;
+  background: linear-gradient(180deg, #f8fbff 0%, #f6f8fc 100%);
+}
+
+.students-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.students-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.students-list::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.55);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.students-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.75);
+  background-clip: content-box;
 }
 
 .student-entry-card {
@@ -7014,6 +7042,11 @@ body,
 
   .student-entry-grid {
     gap: 0.55rem;
+  }
+
+  .students-list {
+    max-height: 70vh;
+    padding-right: 0.2rem;
   }
 
   .student-entry-address {
