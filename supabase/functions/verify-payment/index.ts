@@ -345,7 +345,11 @@ serve(async (req: Request) => {
            })
              .filter(Boolean) as string[];
 
-           if (shiftIds.length === 0) continue;
+           if (shiftIds.length === 0) {
+             throw new Error(
+               `Unable to map shift_ids for imported student "${student.name || student.phone || "unknown"}"`,
+             );
+           }
 
            const studentPayload = {
              library_id: libraryId,

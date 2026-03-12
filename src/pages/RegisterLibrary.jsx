@@ -244,6 +244,16 @@ const normalizeCsvHeader = (header) =>
     .toLowerCase()
     .replace(/\s+/g, '_');
 
+const normalizeShiftLabelKey = (label) =>
+  String(label || '')
+    .replace(/\u00a0/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\bafter noon\b/g, 'afternoon')
+    .replace(/\bnoon\b/g, 'afternoon')
+    .replace(/\s*\+\s*/g, ' + ');
+
 const parseCsvLine = (line) => {
   const values = [];
   let current = '';
@@ -1525,14 +1535,16 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
               .filter((combo) => combo.is_offered)
               .map((combo) => ({ id: combo.id, label: combo.label })),
           ];
+          const shiftLookup = new Map(
+            shiftOptions.map((option) => [normalizeShiftLabelKey(option.label), option.id]),
+          );
+          const unmatchedShiftLabels = new Set();
+          let importedCountForLibrary = 0;
 
           const resolveShiftIdByLabel = (label) => {
-            const normalizedLabel = String(label || '').trim().toLowerCase();
-            if (!normalizedLabel) return '';
-            const matched = shiftOptions.find(
-              (option) => option.label.trim().toLowerCase() === normalizedLabel,
-            );
-            return matched?.id || '';
+            const key = normalizeShiftLabelKey(label);
+            if (!key) return '';
+            return shiftLookup.get(key) || '';
           };
 
           const newStudents = [];
@@ -1557,6 +1569,9 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
             }
 
             if (!name || !phone || !shiftId) {
+              if (name && phone && !shiftId && shiftLabel) {
+                unmatchedShiftLabels.add(shiftLabel);
+              }
               skippedCount += 1;
               continue;
             }
@@ -1583,12 +1598,18 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
               }),
             );
             importedCount += 1;
+            importedCountForLibrary += 1;
           }
 
           const nextStudents = recalculateImportedStudentsForLibrary(lib, [
             ...(lib.imported_students || []),
             ...newStudents,
           ]);
+
+          if (importedCountForLibrary === 0 && unmatchedShiftLabels.size > 0) {
+            const examples = Array.from(unmatchedShiftLabels).slice(0, 5).join(' | ');
+            toast.error(`No valid rows. Unmatched shift_label: ${examples}`);
+          }
 
           return { ...lib, imported_students: nextStudents };
         }),
@@ -1675,7 +1696,8 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
             male_lockers: mLockers,
             female_lockers: fLockers,
             
-            shifts: lib.shifts.map(({ id, ...s }) => ({ ...s, is_base: true })),
+            // Keep local shift ids so verify-payment can map imported student shift_ids reliably.
+            shifts: lib.shifts.map((s) => ({ ...s, is_base: true })),
             combined_pricing: lib.combinedPricing
               ? lib.combinedPricing
                   .filter((combo) => combo.is_offered)
