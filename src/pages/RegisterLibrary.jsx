@@ -519,12 +519,61 @@ const getShiftMetaForStudent = (lib, shiftId, durationMonths) => {
   return { amount: 0, durationHours: null, shiftIds: [] };
 };
 
+const getConfiguredMonthsFromPlans = (...plans) =>
+  Array.from(
+    new Set(
+      plans
+        .flatMap((plan) => getConfiguredPlanEntries(plan || {}).map((entry) => Number(entry.month)))
+        .filter((month) => Number.isFinite(month)),
+    ),
+  ).sort((a, b) => a - b);
+
+const getConfiguredMonthsForShiftOption = (lib, shiftId) => {
+  if (!shiftId) return [];
+
+  const baseShift = (lib?.shifts || []).find((shift) => shift.id === shiftId);
+  if (baseShift) {
+    return getConfiguredMonthsFromPlans(baseShift.fee_plans);
+  }
+
+  const comboShift = (lib?.combinedPricing || []).find((combo) => combo.id === shiftId);
+  if (comboShift) {
+    return getConfiguredMonthsFromPlans(comboShift.custom_fee_plans, comboShift.default_fee_plans);
+  }
+
+  return [];
+};
+
+const getLibraryConfiguredMonths = (lib) =>
+  Array.from(
+    new Set([
+      ...(lib?.shifts || []).flatMap((shift) => getConfiguredMonthsFromPlans(shift.fee_plans)),
+      ...((lib?.combinedPricing || [])
+        .filter((combo) => combo.is_offered)
+        .flatMap((combo) => getConfiguredMonthsFromPlans(combo.custom_fee_plans, combo.default_fee_plans))),
+    ]),
+  ).sort((a, b) => a - b);
+
+const getAvailablePlanMonthsForStudent = (lib, student) => {
+  const shiftSpecificMonths = getConfiguredMonthsForShiftOption(lib, student?.shift_id);
+  if (shiftSpecificMonths.length > 0) return shiftSpecificMonths;
+
+  const libraryMonths = getLibraryConfiguredMonths(lib);
+  if (libraryMonths.length > 0) return libraryMonths;
+
+  return [1];
+};
+
 const recalculateImportedStudentsForLibrary = (lib, students = []) => {
   const occupiedByShift = new Map();
   const occupiedLockers = new Set();
 
   return (students || []).map((student) => {
-    const durationMonths = normalizeDurationMonths(student.plan_duration);
+    const availablePlanMonths = getAvailablePlanMonthsForStudent(lib, student);
+    const requestedDuration = normalizeDurationMonths(student.plan_duration);
+    const durationMonths = availablePlanMonths.includes(requestedDuration)
+      ? requestedDuration
+      : (availablePlanMonths[0] || 1);
     const admissionDate = student.admission_date || getTodayDateISO();
     const endDate = addMonthsToDateISO(admissionDate, durationMonths);
     const gender = normalizeStudentGender(student.gender);
@@ -3113,17 +3162,22 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                                 <section className="student-entry-section">
                                   <h6 className="student-entry-section-title">Payment</h6>
                                   <div className="student-entry-fields">
+                                    {(() => {
+                                      const availablePlanMonths = getAvailablePlanMonthsForStudent(lib, student);
+                                      return (
                                     <select
                                       className="form-select student-entry-input"
                                       value={student.plan_duration}
                                       onChange={(e) => updateStudent(libIdx, sIdx, 'plan_duration', e.target.value)}
                                     >
-                                      {FEE_PLAN_MONTHS.map((month) => (
+                                      {availablePlanMonths.map((month) => (
                                         <option key={month} value={String(month)}>
                                           {month} {month === 1 ? 'Month' : 'Months'}
                                         </option>
                                       ))}
                                     </select>
+                                      );
+                                    })()}
                                     <input
                                       type="date"
                                       className="form-input student-entry-input"
