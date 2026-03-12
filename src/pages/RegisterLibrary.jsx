@@ -615,6 +615,7 @@ export default function RegisterLibrary() {
   // Shift & Combo local states mapped by libIdx
   const [shiftForms, setShiftForms] = useState({});
   const [showShiftForms, setShowShiftForms] = useState({});
+  const [editingShiftIds, setEditingShiftIds] = useState({});
   const [comboForms, setComboForms] = useState({});
   const [showComboForms, setShowComboForms] = useState({});
 
