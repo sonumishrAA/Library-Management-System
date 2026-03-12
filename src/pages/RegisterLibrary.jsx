@@ -212,9 +212,17 @@ const CSV_HEADER_ALIASES = {
 const getTodayDateISO = () => new Date().toISOString().split('T')[0];
 
 const normalizeDurationMonths = (value) => {
-  const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) return 1;
-  return Math.min(12, Math.max(1, Math.round(numericValue)));
+  const rawValue = String(value ?? '').trim().toLowerCase();
+  if (!rawValue) return 1;
+
+  const numericValue = Number(rawValue);
+  if (Number.isFinite(numericValue)) {
+    return Math.min(12, Math.max(1, Math.round(numericValue)));
+  }
+
+  const extractedDigits = rawValue.match(/\d+/);
+  if (!extractedDigits) return 1;
+  return Math.min(12, Math.max(1, Math.round(Number(extractedDigits[0]))));
 };
 
 const addMonthsToDateISO = (dateValue, months) => {
@@ -242,17 +250,72 @@ const normalizeCsvHeader = (header) =>
   String(header || '')
     .trim()
     .toLowerCase()
+    .replace(/^\ufeff/, '')
     .replace(/\s+/g, '_');
 
 const normalizeShiftLabelKey = (label) =>
   String(label || '')
     .replace(/\u00a0/g, ' ')
+    .replace(/\[[^\]]+\]/g, ' ')
     .trim()
     .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+(and)\s+/g, ' + ')
+    .replace(/\s*(\/|&|\||,)\s*/g, ' + ')
     .replace(/\s+/g, ' ')
     .replace(/\bafter noon\b/g, 'afternoon')
     .replace(/\bnoon\b/g, 'afternoon')
+    .replace(/\bmid\s*day\b/g, 'afternoon')
+    .replace(/\bshift\b/g, '')
     .replace(/\s*\+\s*/g, ' + ');
+
+const splitShiftLabelParts = (label) =>
+  normalizeShiftLabelKey(label)
+    .split(' + ')
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+const toCanonicalShiftAlias = (label) => {
+  const normalized = normalizeShiftLabelKey(label).replace(/\s+/g, '');
+  if (!normalized) return '';
+
+  if (
+    ['morning', 'morn', 'morng', 'am', 'm'].includes(normalized) ||
+    /^m\d*$/.test(normalized)
+  ) {
+    return 'morning';
+  }
+  if (
+    ['afternoon', 'afternon', 'afternoon', 'aft', 'pm', 'a', 'noon'].includes(normalized) ||
+    /^a\d*$/.test(normalized)
+  ) {
+    return 'afternoon';
+  }
+  if (
+    ['evening', 'eve', 'evng', 'e'].includes(normalized) ||
+    /^e\d*$/.test(normalized)
+  ) {
+    return 'evening';
+  }
+  if (
+    ['night', 'nite', 'ngt', 'n'].includes(normalized) ||
+    /^n\d*$/.test(normalized)
+  ) {
+    return 'night';
+  }
+
+  return normalized;
+};
+
+const inferShiftAliasFromStartTime = (startTime) => {
+  const [hoursRaw] = String(startTime || '').split(':');
+  const hours = Number(hoursRaw);
+  if (!Number.isFinite(hours)) return '';
+  if (hours >= 5 && hours < 12) return 'morning';
+  if (hours >= 12 && hours < 17) return 'afternoon';
+  if (hours >= 17 && hours < 22) return 'evening';
+  return 'night';
+};
 
 const parseCsvLine = (line) => {
   const values = [];
@@ -1529,22 +1592,97 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
         prev.map((lib, idx) => {
           if (idx !== libIdx) return lib;
 
-          const shiftOptions = [
-            ...(lib.shifts || []).map((shift) => ({ id: shift.id, label: shift.label })),
-            ...(lib.combinedPricing || [])
-              .filter((combo) => combo.is_offered)
-              .map((combo) => ({ id: combo.id, label: combo.label })),
-          ];
-          const shiftLookup = new Map(
-            shiftOptions.map((option) => [normalizeShiftLabelKey(option.label), option.id]),
+          const baseShiftOptions = (lib.shifts || []).map((shift, orderIndex) => ({
+            id: shift.id,
+            label: shift.label,
+            start_time: shift.start_time,
+            orderIndex,
+          }));
+          const offeredCombos = (lib.combinedPricing || [])
+            .filter((combo) => combo.is_offered)
+            .map((combo) => ({
+              id: combo.id,
+              label: combo.label,
+              shift_ids: Array.isArray(combo.shift_ids) ? combo.shift_ids.filter(Boolean) : [],
+            }));
+
+          const shiftLookup = new Map();
+          const baseShiftAliasLookup = new Map();
+          const baseShiftIdSet = new Set(baseShiftOptions.map((shift) => shift.id));
+          const baseShiftOrderLookup = new Map(
+            baseShiftOptions.map((shift) => [shift.id, shift.orderIndex]),
           );
+          const comboByShiftSetLookup = new Map(
+            offeredCombos
+              .filter((combo) => combo.shift_ids.length > 1)
+              .map((combo) => [combo.shift_ids.slice().sort().join('|'), combo.id]),
+          );
+
+          const registerLookup = (key, value) => {
+            if (!key || !value) return;
+            if (!shiftLookup.has(key)) shiftLookup.set(key, value);
+          };
+
+          baseShiftOptions.forEach((shift) => {
+            const labelKey = normalizeShiftLabelKey(shift.label);
+            registerLookup(labelKey, shift.id);
+            const labelAlias = toCanonicalShiftAlias(shift.label);
+            if (labelAlias) {
+              if (!baseShiftAliasLookup.has(labelAlias)) baseShiftAliasLookup.set(labelAlias, shift.id);
+              registerLookup(labelAlias, shift.id);
+            }
+
+            const timeAlias = inferShiftAliasFromStartTime(shift.start_time);
+            if (timeAlias && !baseShiftAliasLookup.has(timeAlias)) {
+              baseShiftAliasLookup.set(timeAlias, shift.id);
+              registerLookup(timeAlias, shift.id);
+            }
+          });
+
+          offeredCombos.forEach((combo) => {
+            registerLookup(normalizeShiftLabelKey(combo.label), combo.id);
+          });
+
           const unmatchedShiftLabels = new Set();
           let importedCountForLibrary = 0;
 
           const resolveShiftIdByLabel = (label) => {
-            const key = normalizeShiftLabelKey(label);
-            if (!key) return '';
-            return shiftLookup.get(key) || '';
+            const directKey = normalizeShiftLabelKey(label);
+            if (!directKey) return '';
+            if (shiftLookup.has(directKey)) return shiftLookup.get(directKey) || '';
+
+            const parts = splitShiftLabelParts(label);
+            if (parts.length === 0) return '';
+
+            if (parts.length === 1) {
+              const singlePartAlias = toCanonicalShiftAlias(parts[0]);
+              return baseShiftAliasLookup.get(singlePartAlias) || '';
+            }
+
+            const resolvedBaseShiftIds = Array.from(
+              new Set(
+                parts
+                  .map((part) => {
+                    const partKey = normalizeShiftLabelKey(part);
+                    const directMatch = shiftLookup.get(partKey);
+                    if (directMatch && baseShiftIdSet.has(directMatch)) return directMatch;
+                    const partAlias = toCanonicalShiftAlias(part);
+                    return baseShiftAliasLookup.get(partAlias) || '';
+                  })
+                  .filter(Boolean),
+              ),
+            );
+
+            if (resolvedBaseShiftIds.length !== parts.length) {
+              return '';
+            }
+
+            const normalizedComboKey = resolvedBaseShiftIds
+              .slice()
+              .sort((a, b) => (baseShiftOrderLookup.get(a) ?? 0) - (baseShiftOrderLookup.get(b) ?? 0))
+              .join('|');
+
+            return comboByShiftSetLookup.get(normalizedComboKey) || '';
           };
 
           const newStudents = [];
