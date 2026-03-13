@@ -262,8 +262,10 @@ serve(async (req: Request) => {
       }
 
       if (!resolvedSeat) {
-        console.warn(`Skipping "${full_name}": no seat available (${gender}/${shiftsToAssign.join(",")})`);
-        return null; // Skip this student gracefully — don't crash the entire import
+        console.warn(`Warning: "${full_name}" imported without a seat (${gender}/${shiftsToAssign.join(",")})`);
+        // We no longer return null here. 
+        // We import the student anyway (seat_number will be empty).
+        // Staff can assign a seat later.
       }
       // ──────────────────────────────────────────────────────────
 
@@ -630,6 +632,10 @@ serve(async (req: Request) => {
         let importedSkipped = 0;
         const skippedNames: string[] = [];
 
+        // Process students in concurrent batches of 10 to avoid timeouts
+        const BATCH_SIZE = 10;
+        const studentPayloads = [];
+
         for (const student of matchingLibPayload.imported_students) {
            if (!student.name || !student.phone) {
              importedSkipped += 1;
@@ -645,7 +651,6 @@ serve(async (req: Request) => {
                ? [student.shift_id]
                : [];
 
-           // Map local frontend shift IDs to DB shift IDs
            const shiftIds = rawShiftIds
              .map((localId: string) => {
              if (!localId) return null;
@@ -667,7 +672,7 @@ serve(async (req: Request) => {
              continue;
            }
 
-           const studentPayload = {
+           studentPayloads.push({
              library_id: libraryId,
              full_name: student.name,
              father_name: student.father_name || "",
@@ -675,7 +680,7 @@ serve(async (req: Request) => {
              gender: student.gender || "male",
              address: student.address || "",
              shift_ids: shiftIds,
-             seat_number: null, // Always auto-assign — students pick shift only
+             seat_number: null,
              assign_locker: Boolean(student.has_locker),
              locker_number: student.locker_no || null,
              plan_duration: String(durationMonths || 1),
@@ -683,22 +688,27 @@ serve(async (req: Request) => {
              payment_status: (student.payment_status || "paid").toLowerCase(),
              start_date: startDate,
              end_date: endDate,
-           };
+             original_name: student.name,
+           });
+        }
 
-           try {
-             const result = await addImportedStudent(studentPayload);
-             if (result) {
-               importedOk += 1;
-             } else {
-               importedSkipped += 1;
-               skippedNames.push(student.name);
-             }
-           } catch (e: any) {
-             console.error(`Failed to import "${student.name}":`, e?.message || e);
-             importedSkipped += 1;
-             skippedNames.push(student.name);
-             // Don't throw — continue with remaining students
-           }
+        for (let i = 0; i < studentPayloads.length; i += BATCH_SIZE) {
+          const batch = studentPayloads.slice(i, i + BATCH_SIZE);
+          await Promise.all(batch.map(async (payload) => {
+            try {
+              const result = await addImportedStudent(payload);
+              if (result) {
+                importedOk += 1;
+              } else {
+                importedSkipped += 1;
+                skippedNames.push(payload.original_name);
+              }
+            } catch (e: any) {
+              console.error(`Failed to import "${payload.original_name}":`, e?.message || e);
+              importedSkipped += 1;
+              skippedNames.push(payload.original_name);
+            }
+          }));
         }
 
         console.log(`Import summary for ${libraryId}: ${importedOk} imported, ${importedSkipped} skipped.`);
