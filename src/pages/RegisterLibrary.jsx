@@ -1965,7 +1965,56 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
           .sort((a, b) => (baseShiftOrderLookup.get(a) ?? 0) - (baseShiftOrderLookup.get(b) ?? 0))
           .join('|');
 
-        return comboByShiftSetLookup.get(normalizedComboKey) || '';
+        if (comboByShiftSetLookup.has(normalizedComboKey)) {
+          return comboByShiftSetLookup.get(normalizedComboKey);
+        }
+
+        // --- NEW LOGIC: Dynamic Combo Generation ---
+        // If combo doesn't exist but all base shifts are valid, create it dynamically
+        const newComboId = `dynamic-combo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        
+        let month1FeeSum = 0;
+        let month3FeeSum = 0;
+        let totalDurationHours = 0;
+        
+        resolvedBaseShiftIds.forEach(id => {
+          const baseS = activeLibrary.shifts.find(s => s.id === id);
+          if (baseS) {
+            month1FeeSum += Number(baseS.fee_plans?.['1'] || 0);
+            month3FeeSum += Number(baseS.fee_plans?.['3'] || 0);
+            totalDurationHours += Number(baseS.duration_hours || 0);
+          }
+        });
+        
+        const defaultFeePlans = createEmptyFeePlans();
+        defaultFeePlans['1'] = String(month1FeeSum);
+        defaultFeePlans['3'] = String(month3FeeSum);
+        
+        const dynamicCombo = {
+          id: newComboId,
+          shift_ids: resolvedBaseShiftIds,
+          label: label.trim(), // Keep original CSV label e.g., "Morning + Night"
+          default_fee: month1FeeSum,
+          default_fee_plans: defaultFeePlans,
+          custom_fee: String(month1FeeSum),
+          custom_fee_plans: { ...defaultFeePlans },
+          is_offered: true, // Auto-enable it
+          start_time: '00:00', // approximation
+          end_time: '23:59',
+          duration_hours: totalDurationHours,
+        };
+        
+        // Mutate the activeLibrary to include this new combo
+        if (!activeLibrary.combinedPricing) {
+          activeLibrary.combinedPricing = [];
+        }
+        activeLibrary.combinedPricing.push(dynamicCombo);
+        
+        // Register in lookups
+        comboByShiftSetLookup.set(normalizedComboKey, newComboId);
+        registerLookup(normalizeShiftLabelKey(label), newComboId);
+        
+        return newComboId;
       };
 
       const newStudents = [];
