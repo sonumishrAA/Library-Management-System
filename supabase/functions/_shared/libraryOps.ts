@@ -10,6 +10,63 @@ export const normalizeShiftIds = (shiftIds: unknown) => {
   return [...new Set(arr.map((item) => String(item || "").trim()).filter(Boolean))].sort();
 };
 
+/**
+ * Expand a list of shift IDs (which may contain combo IDs) into
+ * their constituent base shift IDs.
+ *
+ * - Base shift → returns itself
+ * - Combo shift → returns the base shift_ids from combined_shift_pricing
+ *
+ * This is critical for seat conflict detection: a "Morning+Afternoon"
+ * combo must block both Morning and Afternoon on that seat.
+ */
+export async function expandToBaseShiftIds(
+  supabase: any,
+  libraryId: string,
+  shiftIds: string[],
+): Promise<string[]> {
+  const normalized = normalizeShiftIds(shiftIds);
+  if (normalized.length === 0) return [];
+
+  // 1. Find which of these are base shifts
+  const { data: baseShifts } = await supabase
+    .from("shifts")
+    .select("id")
+    .eq("library_id", libraryId)
+    .eq("is_base", true)
+    .in("id", normalized);
+
+  const baseIdSet = new Set((baseShifts || []).map((s: any) => s.id));
+  const result = new Set<string>();
+
+  for (const sid of normalized) {
+    if (baseIdSet.has(sid)) {
+      // Already a base shift
+      result.add(sid);
+    } else {
+      // Might be a combo — look up its constituent base shifts
+      const { data: combo } = await supabase
+        .from("combined_shift_pricing")
+        .select("shift_ids")
+        .eq("id", sid)
+        .eq("library_id", libraryId)
+        .maybeSingle();
+
+      if (combo?.shift_ids) {
+        const comboBaseIds = normalizeShiftIds(combo.shift_ids);
+        for (const baseId of comboBaseIds) {
+          result.add(baseId);
+        }
+      } else {
+        // Unknown shift — include as-is (best effort)
+        result.add(sid);
+      }
+    }
+  }
+
+  return [...result].sort();
+}
+
 export const sameShiftSet = (left: string[], right: string[]) => {
   if (left.length !== right.length) return false;
   return left.every((value, index) => value === right[index]);
@@ -178,12 +235,15 @@ export async function findAvailableSeats(
     seats = await fetchSeats(false);
   }
 
-  const normalizedShiftIds = normalizeShiftIds(shiftIds);
+  // CRITICAL: Expand combo shift IDs to base shifts for proper conflict detection
+  const baseShiftIds = await expandToBaseShiftIds(supabase, libraryId, shiftIds);
+  if (baseShiftIds.length === 0) return [];
+
   const { data: occupied, error: occError } = await supabase
     .from("seat_occupancy")
     .select("seat_number")
     .eq("library_id", libraryId)
-    .in("shift_id", normalizedShiftIds)
+    .in("shift_id", baseShiftIds)
     .lte("start_date", endDate)
     .gte("end_date", startDate);
 

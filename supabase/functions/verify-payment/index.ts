@@ -3,7 +3,7 @@ import bcrypt from "npm:bcryptjs@3.0.2";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.0";
 import { corsHeaders } from "../_shared/cors.ts";
 import { generateLoginId, generatePassword } from "../_shared/utils.ts";
-import { findAvailableSeats, normalizeShiftIds } from "../_shared/libraryOps.ts";
+import { expandToBaseShiftIds, findAvailableSeats, normalizeShiftIds } from "../_shared/libraryOps.ts";
 
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -315,11 +315,13 @@ serve(async (req: Request) => {
       }
 
       if (resolvedSeat) {
-        const occupancyRows = (memberships || []).map((membership: any) => ({
+        // CRITICAL: Expand combo shifts to base shifts for proper conflict detection
+        const baseShiftIdsForOcc = await expandToBaseShiftIds(supabase, library_id, shiftsToAssign);
+        const occupancyRows = baseShiftIdsForOcc.map((baseShiftId: string) => ({
           library_id,
           seat_number: resolvedSeat,
-          membership_id: membership.id,
-          shift_id: membership.shift_id,
+          membership_id: (memberships || [])[0]?.id,
+          shift_id: baseShiftId,
           gender,
           start_date,
           end_date,

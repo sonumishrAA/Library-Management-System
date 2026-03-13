@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders } from "../_shared/cors.ts";
 import { addMonthsDate, ensurePortalAccess, todayDate } from "../_shared/libraryPortal.ts";
-import { createAuditEvent, ensureLockerSelection, ensureSeatSelection, loadLibraryConfiguration, notifyOwners, resolveShiftSelectionPricing, normalizeShiftIds, monthsFromPlanDuration } from "../_shared/libraryOps.ts";
+import { createAuditEvent, ensureLockerSelection, ensureSeatSelection, expandToBaseShiftIds, loadLibraryConfiguration, notifyOwners, resolveShiftSelectionPricing, normalizeShiftIds, monthsFromPlanDuration } from "../_shared/libraryOps.ts";
 
 serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -104,11 +104,14 @@ serve(async (req: Request) => {
       throw new Error(`Failed to create membership: ${membershipError?.message || "Unknown error"}`);
     }
 
-    const occupancyRows = memberships.map((membership: any) => ({
+    // CRITICAL: Expand shift IDs to base shifts for proper seat conflict detection
+    // A "Morning+Afternoon" combo → 2 occupancy rows (morning_uuid, afternoon_uuid)
+    const baseShiftIdsForOccupancy = await expandToBaseShiftIds(supabase, libraryId, shiftIds);
+    const occupancyRows = baseShiftIdsForOccupancy.map((baseShiftId) => ({
       library_id: libraryId,
       seat_number: seatSelection.seat_number,
-      membership_id: membership.id,
-      shift_id: membership.shift_id,
+      membership_id: memberships[0].id,
+      shift_id: baseShiftId,
       gender,
       start_date: startDate,
       end_date: endDate,
