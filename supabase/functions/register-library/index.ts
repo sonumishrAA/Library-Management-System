@@ -72,6 +72,8 @@ serve(async (req: Request) => {
         total_lockers,
         male_seats: male_seats || 0,
         female_seats: female_seats || 0,
+        male_lockers: male_lockers || 0,
+        female_lockers: female_lockers || 0,
         contact_phone,
         contact_email,
         status: "pending_payment",
@@ -151,6 +153,10 @@ serve(async (req: Request) => {
             shift_ids,
             label: c.label,
             combined_fee: Number.isNaN(comboMonthOne) ? 0 : comboMonthOne,
+            fee_plans:
+              c?.custom_fee_plans && typeof c.custom_fee_plans === "object"
+                ? c.custom_fee_plans
+                : {},
           };
         });
 

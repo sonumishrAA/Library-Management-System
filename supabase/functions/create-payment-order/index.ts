@@ -247,7 +247,12 @@ serve(async (req: Request) => {
          order_id: orderData.id,
          library_ids,
          amount: totalAmount,
-         status: "created"
+         status: "created",
+         plan_selections,
+         promo_code_id: promo_code_id || null,
+         metadata: {
+           library_count: library_ids.length,
+         },
       });
 
     if (insertError) {

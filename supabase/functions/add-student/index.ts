@@ -84,7 +84,7 @@ serve(async (req: Request) => {
     const numericAmount = Number(amount_paid || 0);
     const normalizedPaymentStatus = String(payment_status || "paid").toLowerCase();
 
-    const membershipRows = shiftsToAssign.map(sId => ({
+    const membershipRows = shiftsToAssign.map((sId, index) => ({
       student_id,
       library_id,
       shift_id: sId,
@@ -92,7 +92,7 @@ serve(async (req: Request) => {
       locker_number: assign_locker && locker_number ? locker_number : "",
       start_date,
       end_date,
-      amount_paid: Number.isFinite(numericAmount) ? numericAmount : 0,
+      amount_paid: index === 0 && Number.isFinite(numericAmount) ? numericAmount : 0,
       payment_mode: payment_mode || "cash",
       payment_status: normalizedPaymentStatus,
       plan_duration: String(plan_duration || "1"),

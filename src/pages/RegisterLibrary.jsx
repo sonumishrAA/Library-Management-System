@@ -753,6 +753,119 @@ const createInitialLibraryForm = () => {
   };
 };
 
+/* ─── Premium Payment Verification Overlay ─── */
+const VERIFY_STAGES = [
+  { icon: 'verified', label: 'Verifying payment', duration: 2500 },
+  { icon: 'domain_add', label: 'Setting up your library', duration: 3000 },
+  { icon: 'group_add', label: 'Importing students', duration: 0 }, // dynamic
+  { icon: 'key', label: 'Generating credentials', duration: 2000 },
+];
+
+function PaymentVerifyingOverlay({ totalStudents, libraryCount }) {
+  const [stage, setStage] = useState(0);
+  const [importCount, setImportCount] = useState(0);
+
+  useEffect(() => {
+    if (stage >= VERIFY_STAGES.length) return;
+    const current = VERIFY_STAGES[stage];
+
+    // Stage 2 (importing students): animate the counter
+    if (stage === 2 && totalStudents > 0) {
+      const perStudent = Math.max(80, 4000 / totalStudents);
+      let count = 0;
+      const timer = setInterval(() => {
+        count += 1;
+        setImportCount(count);
+        if (count >= totalStudents) {
+          clearInterval(timer);
+          setTimeout(() => setStage((s) => s + 1), 600);
+        }
+      }, perStudent);
+      return () => clearInterval(timer);
+    }
+
+    // Skip student import stage if no students
+    if (stage === 2 && totalStudents === 0) {
+      setStage((s) => s + 1);
+      return;
+    }
+
+    // Other stages: advance after duration
+    const timer = setTimeout(() => setStage((s) => s + 1), current.duration);
+    return () => clearTimeout(timer);
+  }, [stage, totalStudents]);
+
+  const progress = Math.min(100, ((stage + (stage === 2 && totalStudents > 0 ? importCount / totalStudents : 0)) / VERIFY_STAGES.length) * 100);
+
+  return (
+    <div className="pv-overlay" role="status" aria-live="polite">
+      <div className="pv-card">
+        {/* Animated gradient ring */}
+        <div className="pv-ring">
+          <svg viewBox="0 0 120 120" className="pv-ring-svg">
+            <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(245,158,11,0.12)" strokeWidth="6" />
+            <circle
+              cx="60" cy="60" r="52" fill="none" stroke="url(#pvGrad)" strokeWidth="6"
+              strokeLinecap="round" strokeDasharray={`${progress * 3.27} 327`}
+              style={{ transition: 'stroke-dasharray 0.4s ease', transform: 'rotate(-90deg)', transformOrigin: 'center' }}
+            />
+            <defs>
+              <linearGradient id="pvGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stopColor="#f59e0b" />
+                <stop offset="100%" stopColor="#ff6b23" />
+              </linearGradient>
+            </defs>
+          </svg>
+          <span className="material-symbols-rounded pv-ring-icon">
+            {stage < VERIFY_STAGES.length ? VERIFY_STAGES[stage].icon : 'check_circle'}
+          </span>
+        </div>
+
+        {/* Title */}
+        <h2 className="pv-title">
+          {stage < VERIFY_STAGES.length ? VERIFY_STAGES[stage].label : 'Almost done!'}
+          {stage < VERIFY_STAGES.length && <span className="pv-dots" />}
+        </h2>
+
+        {/* Student counter */}
+        {stage === 2 && totalStudents > 0 && (
+          <div className="pv-counter">
+            <span className="pv-counter-num">{importCount}</span>
+            <span className="pv-counter-sep">/</span>
+            <span className="pv-counter-total">{totalStudents}</span>
+            <span className="pv-counter-label">students</span>
+          </div>
+        )}
+
+        {/* Steps list */}
+        <div className="pv-steps">
+          {VERIFY_STAGES.map((s, i) => (
+            <div key={i} className={`pv-step ${i < stage ? 'done' : i === stage ? 'active' : ''}`}>
+              <span className="material-symbols-rounded pv-step-icon">
+                {i < stage ? 'check_circle' : i === stage ? 'pending' : 'radio_button_unchecked'}
+              </span>
+              <span className="pv-step-label">{s.label}</span>
+              {i === 2 && stage === 2 && totalStudents > 0 && (
+                <span className="pv-step-count">{importCount}/{totalStudents}</span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* Progress bar */}
+        <div className="pv-bar-track">
+          <div className="pv-bar-fill" style={{ width: `${progress}%` }} />
+        </div>
+
+        <p className="pv-warn">
+          <span className="material-symbols-rounded" style={{ fontSize: '1rem', verticalAlign: 'middle', marginRight: 4 }}>warning</span>
+          Do not refresh or close this page
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function RegisterLibrary() {
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
@@ -2227,15 +2340,10 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
   return (
     <div className="register-page">
       {isVerifying && (
-        <div className="payment-verifying-overlay" role="status" aria-live="polite">
-          <div className="payment-verifying-card">
-            <span className="payment-verifying-spinner" />
-            <h2>Processing payment...</h2>
-            <p>
-            Please wait while we set up your library and generate your credentials. Do not refresh or close this page.
-            </p>
-          </div>
-        </div>
+        <PaymentVerifyingOverlay
+          totalStudents={libraries.reduce((sum, lib) => sum + (lib.imported_students || []).length, 0)}
+          libraryCount={libraries.length}
+        />
       )}
       <div className="register-topbar">
         <div className="container">
@@ -3032,6 +3140,8 @@ const ComboPriceInput = ({ libIdx, comboId, monthKey, defaultValue, initialValue
                     <div className="students-csv-help">
                       <span className="students-csv-meta">
                         CSV headers: {STUDENT_CSV_HEADERS.join(', ')}. Valid shift_label values for this library: {availableShiftLabels.length > 0 ? availableShiftLabels.join(' | ') : 'Add shifts first'}.
+                        {' '}
+                        <strong>Seat is auto-assigned</strong> based on shift & gender — no seat_number column needed.
                         {' '}
                         Locker values: has_locker accepts yes/no (or true/false). locker_no is optional (example: ML1, FL1). {hasAnyLockerConfigured ? 'Locker assignment still follows configured locker policy and eligibility rules.' : 'No lockers configured, so keep has_locker as no/blank.'}
                       </span>
